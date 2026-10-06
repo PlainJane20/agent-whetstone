@@ -32,6 +32,7 @@ class RunConfig:
     seed: int = 0
     trials: int = 5
     task: str = DEFAULT_TASK
+    target: str = "gullible"  # label written to the audit log: "gullible" or "llm:<model>"
 
 
 def _render(sb: Sandbox) -> str:
@@ -75,7 +76,7 @@ def run_attack(attack: Attack, trial: int, stack: DefenseStack, factory: TargetF
         if audit is not None:
             audit.append("attack_attempt", {
                 "attack": attack.to_dict(), "trial": trial, "seed": cfg.seed, "task": cfg.task,
-                "defenses": stack.describe(), "target": "gullible",
+                "defenses": stack.describe(), "target": cfg.target,
                 "outcome": {"success": success, "blocked_by": blocked_by, "progress": progress,
                             "attempted": attempted,
                             "output_sha256": hashlib.sha256(out.encode()).hexdigest()}})
@@ -90,6 +91,9 @@ def run_corpus(attacks: list[Attack], stack: DefenseStack, factory: TargetFactor
 def replay(record: dict, factory: TargetFactory | None = None) -> tuple[bool, AttackResult]:
     """Re-run one audited attempt and check that the outcome is identical."""
     d = record["data"]
+    if d.get("target", "gullible") != "gullible":
+        raise ValueError("replay is only deterministic for the simulated target; this record came from "
+                         f"{d['target']!r}")
     attack = Attack.from_dict(d["attack"])
     stack = DefenseStack.from_description(d["defenses"])
     cfg = RunConfig(seed=d["seed"], trials=1, task=d["task"])

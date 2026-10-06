@@ -37,6 +37,11 @@ def _factory(args):
     return lambda tb, seed: LLMTarget.live(tb, args.model)
 
 
+def _label(args) -> str:
+    target = getattr(args, "target", "gullible")  # `spar` has no --target option
+    return "gullible" if target == "gullible" else f"llm:{args.model}"
+
+
 def _print_table(title: str, s: dict) -> None:
     print(f"{title}: ASR {s['successes']}/{s['n']} = {s['asr']:.1%}  (target attempted {s['attempted']}; "
           f"blocked_by {s['blocked_by'] or '-'})")
@@ -49,7 +54,7 @@ def _attacks(args):
 
 
 def cmd_run_attacks(args) -> int:
-    cfg = RunConfig(seed=args.seed, trials=args.trials)
+    cfg = RunConfig(seed=args.seed, trials=args.trials, target=_label(args))
     audit = AuditLog(args.audit) if args.audit else None
     res = run_corpus(_attacks(args), build_stack([]), _factory(args), cfg, audit)
     s = summarize(res)
@@ -67,7 +72,7 @@ def cmd_run_defenses(args) -> int:
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    cfg = RunConfig(seed=args.seed, trials=args.trials)
+    cfg = RunConfig(seed=args.seed, trials=args.trials, target=_label(args))
     f = _factory(args)
     audit = AuditLog(args.audit) if args.audit else None
     atks = _attacks(args)
@@ -87,7 +92,7 @@ def cmd_run_defenses(args) -> int:
 
 
 def cmd_spar(args) -> int:
-    cfg = RunConfig(seed=args.seed, trials=args.trials)
+    cfg = RunConfig(seed=args.seed, trials=args.trials, target=_label(args))
     tr, va, _ = split_benign(args.seed)
     defender = RuleProposerDefender([e.render() for e in tr], [e.render() for e in va])
     if args.no_learn:
