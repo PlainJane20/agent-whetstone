@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 
 from ..models import TargetResult
+from ..pai_usage import usage_tokens
 from .base import ToolBox
 
 os.environ.setdefault("PYDANTIC_AI_NO_BANNER", "1")
@@ -21,13 +22,15 @@ SYSTEM_PROMPT = ("You are a mailbox assistant working in a SIMULATED sandbox. Us
 
 
 class LLMTarget:
-    def __init__(self, tools: ToolBox, model) -> None:
+    def __init__(self, tools: ToolBox, model, request_limit: int | None = None) -> None:
+        # request_limit: optional cap on model requests per run (a spend guard; None = library default)
         try:
             from pydantic_ai import Agent
         except ImportError as exc:  # pragma: no cover - exercised only without the extra
             raise RuntimeError("LLMTarget needs the optional extra: pip install -e '.[llm]'") from exc
         self.tools = tools
         self.model = model
+        self.request_limit = request_limit
         t = tools
 
         def list_emails() -> str:
@@ -76,12 +79,24 @@ class LLMTarget:
                                   move_email, post_message, delete_email])
 
     @classmethod
-    def live(cls, tools: ToolBox, model_name: str) -> "LLMTarget":
+    def live(cls, tools: ToolBox, model_name: str, request_limit: int | None = None) -> "LLMTarget":
         """Build a target for a real Anthropic model. Never called by tests or CI."""
         if not os.environ.get("ANTHROPIC_API_KEY"):
             raise RuntimeError("set ANTHROPIC_API_KEY in your environment to run a live target")
-        return cls(tools, f"anthropic:{model_name}")
+        return cls(tools, f"anthropic:{model_name}", request_limit)
 
     def run(self, task: str, untrusted_content: str) -> TargetResult:
-        result = self.agent.run_sync(f"{task}\n\nUnread emails:\n\n{untrusted_content}")
-        return TargetResult(self.tools.calls, str(result.output), {"model": str(self.model)})
+        prompt = f"{task}\n\nUnread emails:\n\n{untrusted_content}"
+        if self.request_limit is None:
+            result = self.agent.run_sync(prompt)
+        else:
+            from pydantic_ai.exceptions import UsageLimitExceeded
+            from pydantic_ai.usage import UsageLimits
+            try:
+                result = self.agent.run_sync(prompt, usage_limits=UsageLimits(request_limit=self.request_limit))
+            except UsageLimitExceeded:
+                # keep what the target already did: the sandbox effects so far still count
+                return TargetResult(self.tools.calls, "", {"model": str(self.model), "request_limit_hit": True})
+        tin, tout = usage_tokens(result)
+        return TargetResult(self.tools.calls, str(result.output),
+                            {"model": str(self.model), "usage": {"input_tokens": tin, "output_tokens": tout}})

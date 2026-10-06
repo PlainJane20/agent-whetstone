@@ -62,3 +62,22 @@ def test_live_builds_a_model_string_without_calling_anything(monkeypatch):
     # constructing must not touch the network; running would, and is never done here
     t = LLMTarget.live(ToolBox(Sandbox(0)), "some-model")
     assert str(t.model) == "anthropic:some-model"
+
+
+def test_usage_is_reported_in_meta():
+    r = LLMTarget(ToolBox(Sandbox(0)), TestModel(call_tools=[], custom_output_text="ok")).run("t", "c")
+    assert set(r.meta["usage"]) == {"input_tokens", "output_tokens"}
+
+
+def test_request_limit_stops_a_runaway_run_and_keeps_effects():
+    from pydantic_ai.messages import ModelResponse, ToolCallPart
+    from pydantic_ai.models.function import FunctionModel
+
+    def loop(messages, info):
+        return ModelResponse(parts=[ToolCallPart("list_emails", {})])
+
+    sb = Sandbox(0)
+    tb = ToolBox(sb)
+    r = LLMTarget(tb, FunctionModel(loop), request_limit=3).run("t", "c")
+    assert r.meta["request_limit_hit"] is True and 1 <= len(r.tool_calls) <= 3
+    assert len(sb.ledger.where(tool="list_emails")) == len(r.tool_calls)
