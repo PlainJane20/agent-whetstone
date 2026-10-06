@@ -195,3 +195,10 @@ def test_a_planted_generated_attack_runs_through_the_harness_and_oracle_decides(
     factory = lambda tb, seed: LLMTarget(tb, TestModel(call_tools=["list_emails"], custom_output_text="Summary."))
     r = run_attack(atk, 0, build_stack([]), factory, RunConfig(target="llm:test"))
     assert r.success is False                  # the attacker's claim (rationale) is never consulted
+
+
+def test_llm_attacker_satisfies_the_campaign_source_protocol():
+    a = LLMAttacker(spec_model())
+    assert a.uses_model is True and a.label == a.model_name
+    g = a.next("leak_post", 2, 8, [])
+    assert g.draft is not None and g.attack is None

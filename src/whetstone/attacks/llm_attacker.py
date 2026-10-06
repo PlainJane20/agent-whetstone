@@ -118,6 +118,16 @@ class LLMAttacker:
         m = self.model if isinstance(self.model, str) else getattr(self.model, "model_name", type(self.model).__name__)
         return m.split(":", 1)[1] if m.startswith("anthropic:") else m
 
+    # -- AttackSource protocol (attacks/campaign.py) ---------------------------------------
+    uses_model = True
+
+    @property
+    def label(self) -> str:
+        return self.model_name
+
+    def next(self, goal: str, round_no: int, rounds: int, feedback: list[RoundFeedback]) -> Generation:
+        return self.generate(goal, round_no, feedback, rounds=rounds)
+
     @classmethod
     def live(cls, model_name: str = DEFAULT_ATTACKER_MODEL.split(":", 1)[1], **kw) -> "LLMAttacker":
         """Build an attacker for a real Anthropic model. Never called by tests or CI."""
