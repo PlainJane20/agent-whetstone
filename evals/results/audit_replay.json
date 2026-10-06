@@ -1,0 +1,26 @@
+{
+  "meta": {
+    "environment": "SIMULATED (synthetic inbox, fake tools, fake CANARY secrets, simulated target)",
+    "python": "3.14.7",
+    "platform": "macOS-26.7.1-arm64-arm-64bit-Mach-O",
+    "machine": "arm64",
+    "timestamp_utc": "2026-10-06T03:06:48+00:00",
+    "git_commit": "",
+    "seed": 0,
+    "trials_per_attack": 5,
+    "caveat": [
+      "All attacks, all benign messages, the screening rules and the gullible target's susceptibility",
+      "profile were written by the same author. The target is a SIMULATION of a gullible agent, not a",
+      "language model. These numbers show that the harness works and how defenses compare against THIS",
+      "model; they are not an estimate of real-world security or of how any real LLM behaves."
+    ]
+  },
+  "records": 22,
+  "head_hash": "40d444c1edaab2e1457f6502810b6252a5d11440cf314a669125a1119f6a6e74",
+  "chain_verifies": true,
+  "replayed": 22,
+  "replay_identical": 22,
+  "tamper_detected": true,
+  "tamper_first_bad_index": 3,
+  "file": "evals/results/audit_sample.jsonl"
+}

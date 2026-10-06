@@ -1,0 +1,73 @@
+{
+  "meta": {
+    "environment": "SIMULATED (synthetic inbox, fake tools, fake CANARY secrets, simulated target)",
+    "python": "3.14.7",
+    "platform": "macOS-26.7.1-arm64-arm-64bit-Mach-O",
+    "machine": "arm64",
+    "timestamp_utc": "2026-10-06T03:06:46+00:00",
+    "git_commit": "",
+    "seed": 0,
+    "trials_per_attack": 5,
+    "caveat": [
+      "All attacks, all benign messages, the screening rules and the gullible target's susceptibility",
+      "profile were written by the same author. The target is a SIMULATION of a gullible agent, not a",
+      "language model. These numbers show that the harness works and how defenses compare against THIS",
+      "model; they are not an estimate of real-world security or of how any real LLM behaves."
+    ]
+  },
+  "caveats": [
+    "In-process, single thread, warm caches, after a warm-up. No network, no model call.",
+    "Inputs are short synthetic emails; real mail is longer and the screen scales with length.",
+    "'run_attack_*' includes the simulated target and the sandbox; it says nothing about a real LLM.",
+    "Numbers come from one machine; the JSON records which."
+  ],
+  "input_screen_scan": {
+    "n": 2000,
+    "p50_ms": 0.1442,
+    "p95_ms": 0.1811,
+    "p99_ms": 0.201,
+    "max_ms": 0.2612
+  },
+  "spotlight_wrap": {
+    "n": 2000,
+    "p50_ms": 0.0009,
+    "p95_ms": 0.0013,
+    "p99_ms": 0.0016,
+    "max_ms": 0.0095
+  },
+  "egress_filter_output": {
+    "n": 2000,
+    "p50_ms": 0.0032,
+    "p95_ms": 0.0037,
+    "p99_ms": 0.0041,
+    "max_ms": 0.0188
+  },
+  "tool_policy_check": {
+    "n": 5000,
+    "p50_ms": 0.0003,
+    "p95_ms": 0.0004,
+    "p99_ms": 0.0005,
+    "max_ms": 0.0081
+  },
+  "all_defenses_per_run (prepare + 2 guards + finalize)": {
+    "n": 2000,
+    "p50_ms": 0.156,
+    "p95_ms": 0.1957,
+    "p99_ms": 0.2855,
+    "max_ms": 0.9098
+  },
+  "run_attack_no_defense": {
+    "n": 550,
+    "p50_ms": 0.7685,
+    "p95_ms": 0.8887,
+    "p99_ms": 0.9429,
+    "max_ms": 1.019
+  },
+  "run_attack_all_four": {
+    "n": 550,
+    "p50_ms": 0.9035,
+    "p95_ms": 1.7081,
+    "p99_ms": 1.774,
+    "max_ms": 1.7918
+  }
+}

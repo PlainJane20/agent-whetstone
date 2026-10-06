@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 320" role="img" aria-labelledby="title description">
+  <title id="title">Whetstone</title>
+  <desc id="description">A sparring partner for AI agents: sandboxed prompt-injection and data-exfiltration attacks, composable defenses, deterministic oracles and honest attack-success measurement, in a simulated environment.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#14070b"/>
+      <stop offset="0.56" stop-color="#4a0f24"/>
+      <stop offset="1" stop-color="#e11d48" stop-opacity=".7"/>
+    </linearGradient>
+    <radialGradient id="glow">
+      <stop offset="0" stop-color="#fb7185" stop-opacity=".25"/>
+      <stop offset="1" stop-color="#fb7185" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="shadow" x="-25%" y="-25%" width="150%" height="150%">
+      <feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#0f0306" flood-opacity=".38"/>
+    </filter>
+  </defs>
+  <rect width="1200" height="320" rx="24" fill="url(#bg)"/>
+  <circle cx="1040" cy="60" r="230" fill="url(#glow)"/>
+  <g opacity=".2" fill="none" stroke="#fda4af" stroke-width="1.2">
+    <path d="M760 230l60-40 60 30 70-60 60 40 90-30"/>
+    <g fill="#fda4af" stroke="none"><circle cx="760" cy="230" r="5"/><circle cx="880" cy="220" r="5"/><circle cx="1010" cy="160" r="5"/><circle cx="1180" cy="170" r="5"/></g>
+  </g>
+  <g transform="translate(74 68)" filter="url(#shadow)">
+    <rect width="88" height="88" rx="22" fill="#2b0a15" stroke="#fb7185" stroke-opacity=".6"/>
+    <g fill="none" stroke="#fda4af" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="16" y="54" width="56" height="16" rx="4"/>
+      <path d="M24 46L66 28l-3 12-37 9z"/>
+      <path d="M60 22l4-7M68 27l8-4M54 20l1-8"/>
+    </g>
+  </g>
+  <text x="190" y="118" fill="#fff1f2" font-family="Inter, -apple-system, Segoe UI, sans-serif" font-size="56" font-weight="700">Whetstone</text>
+  <text x="190" y="162" fill="#fecdd3" font-family="Inter, -apple-system, Segoe UI, sans-serif" font-size="24">A sparring partner for AI agents</text>
+  <text x="74" y="250" fill="#ffe4e6" font-family="Inter, -apple-system, Segoe UI, sans-serif" font-size="20" opacity=".9">sandboxed attacks  ·  composable defenses  ·  deterministic oracles  ·  honest measurement</text>
+</svg>

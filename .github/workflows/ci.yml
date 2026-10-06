@@ -1,0 +1,27 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install -e ".[dev]"
+      - run: python -m pytest
+      # Offline evals: baseline ASR, defenses, rule-proposer generalisation, mutation, oracle sanity.
+      # Exits non-zero if an oracle sanity check or a harness regression gate fails.
+      - run: python -m evals.run_all
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eval-results-py${{ matrix.python }}
+          path: evals/results/*.json
