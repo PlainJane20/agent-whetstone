@@ -4,8 +4,8 @@
     "python": "3.14.7",
     "platform": "macOS-26.7.1-arm64-arm-64bit-Mach-O",
     "machine": "arm64",
-    "timestamp_utc": "2026-10-06T03:06:46+00:00",
-    "git_commit": "",
+    "timestamp_utc": "2026-10-06T03:11:13+00:00",
+    "git_commit": "a69030d",
     "seed": 0,
     "trials_per_attack": 5,
     "caveat": [
@@ -23,51 +23,51 @@
   ],
   "input_screen_scan": {
     "n": 2000,
-    "p50_ms": 0.1442,
-    "p95_ms": 0.1811,
-    "p99_ms": 0.201,
-    "max_ms": 0.2612
+    "p50_ms": 0.1457,
+    "p95_ms": 0.1735,
+    "p99_ms": 0.1846,
+    "max_ms": 0.2225
   },
   "spotlight_wrap": {
     "n": 2000,
-    "p50_ms": 0.0009,
-    "p95_ms": 0.0013,
-    "p99_ms": 0.0016,
-    "max_ms": 0.0095
+    "p50_ms": 0.001,
+    "p95_ms": 0.0012,
+    "p99_ms": 0.0014,
+    "max_ms": 0.0016
   },
   "egress_filter_output": {
     "n": 2000,
     "p50_ms": 0.0032,
-    "p95_ms": 0.0037,
-    "p99_ms": 0.0041,
-    "max_ms": 0.0188
+    "p95_ms": 0.0033,
+    "p99_ms": 0.0034,
+    "max_ms": 0.0086
   },
   "tool_policy_check": {
     "n": 5000,
     "p50_ms": 0.0003,
     "p95_ms": 0.0004,
-    "p99_ms": 0.0005,
-    "max_ms": 0.0081
+    "p99_ms": 0.0004,
+    "max_ms": 0.0005
   },
   "all_defenses_per_run (prepare + 2 guards + finalize)": {
     "n": 2000,
-    "p50_ms": 0.156,
-    "p95_ms": 0.1957,
-    "p99_ms": 0.2855,
-    "max_ms": 0.9098
+    "p50_ms": 0.1551,
+    "p95_ms": 0.1877,
+    "p99_ms": 0.1982,
+    "max_ms": 0.3966
   },
   "run_attack_no_defense": {
     "n": 550,
-    "p50_ms": 0.7685,
-    "p95_ms": 0.8887,
-    "p99_ms": 0.9429,
-    "max_ms": 1.019
+    "p50_ms": 0.7605,
+    "p95_ms": 0.8624,
+    "p99_ms": 0.9418,
+    "max_ms": 0.9578
   },
   "run_attack_all_four": {
     "n": 550,
-    "p50_ms": 0.9035,
-    "p95_ms": 1.7081,
-    "p99_ms": 1.774,
-    "max_ms": 1.7918
+    "p50_ms": 0.9006,
+    "p95_ms": 1.708,
+    "p99_ms": 1.9074,
+    "max_ms": 2.0007
   }
 }

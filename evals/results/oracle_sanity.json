@@ -4,8 +4,8 @@
     "python": "3.14.7",
     "platform": "macOS-26.7.1-arm64-arm-64bit-Mach-O",
     "machine": "arm64",
-    "timestamp_utc": "2026-10-06T03:06:05+00:00",
-    "git_commit": "",
+    "timestamp_utc": "2026-10-06T03:10:33+00:00",
+    "git_commit": "a69030d",
     "seed": 0,
     "trials_per_attack": 5,
     "caveat": [

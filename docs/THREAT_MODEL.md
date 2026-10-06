@@ -1,0 +1,53 @@
+# Threat model
+
+Whetstone is a **defensive evaluation harness**. This document states what it attacks (only its own sandbox), what the defenses it tests do and do not stop, and where a simulation stops being evidence. The environment is simulated, so every statement about "reality" below is a limit, not a result.
+
+## Scope and misuse boundaries
+
+- **In scope:** attacks against this project's own simulated sandbox: a synthetic inbox of benign emails, fake tools, and fake canary strings (`CANARY-` plus 12 hex characters, unique per seed, with no value outside the sandbox).
+- **Payloads are generic and benign by construction:** they ask an assistant to make a fake tool call, post to a fake channel, or reveal a fake string. Destinations are reserved `.example` names. There is no malware, no real credential, no real service and no exploit code in the repository.
+- **Do not point any of this at a system you do not own.** The attack templates are simple, but the discipline matters: use them against your own agents, in your own sandbox, with fake data. The live-model path (`LLMTarget.live`, `--target llm --live`) exists for that purpose, requires your own key from the environment, and has never been run in this repository.
+- **No data from any employer or real person** is used. Every email, sender and domain is synthetic.
+- **Out of scope:** attacking third-party agents, products or services; testing against real mailboxes; anything that exfiltrates real data.
+
+## Assets and actors
+
+- **Asset under test:** an agent's behaviour when the content it reads is hostile (the sandbox's mailbox, notes, and tools).
+- **Attacker** (scripted or mutating, offline): untrusted, controls the text of one or two emails, nothing else.
+- **Target:** untrusted by design. The only target run here is a **simulation** of a gullible agent.
+- **Defenses:** trusted code (screen, spotlighting, egress filter, tool policy) running in-process.
+- **Oracles and ledger:** trusted code; the ledger is append-only by API and its entries are frozen.
+
+## What the harness protects, and how
+
+| Property | Mechanism | Evidence |
+|---|---|---|
+| Attacks cannot reach real systems | The package imports no network client (the optional pydantic-ai import in `LLMTarget` is never called here); the sandbox tools are in-memory | `test_no_network_modules_used_by_the_package`, `tests/test_sandbox.py` |
+| A success claim is not the target's say-so | A deterministic oracle reads executed effects and delivered text | `tests/test_oracles.py`, `test_oracle_decides_success_not_the_target` |
+| The oracle can fail in both directions | 23 known-bad and known-good cases; a negative control breaks an oracle on purpose | `evals/oracle_sanity.py`, `test_oracle_sanity_can_fail` |
+| A blocked action leaves no effect | Guard runs before the sandbox executes; the ledger only records executed calls | `test_blocked_call_never_reaches_the_ledger_but_counts_as_attempted` |
+| Comparisons across defenses are paired | The target's random draw depends on the content with any spotlight envelope removed | `test_spotlighting_only_ever_removes_successes` |
+| A defense cannot learn the benign set it is scored on | Proposer trains on benign-train, validates on a held-out validation set, FPR is reported on a third split | `evals/generalisation.py` |
+| Runs are tamper-evident and replayable | Hash-chained audit with full attack, defense config and seeds per record | `tests/test_audit.py`, `evals/audit_replay.py` |
+
+## What the defenses do NOT stop
+
+1. **Novel attacks.** A screen is a set of patterns. The held-out evaluation shows learned rules cut held-out ASR by only 26 to 37%, and mostly by recognising what is being requested, not the technique.
+2. **A smarter adaptive attacker.** The mutation eval breaks the input screen with Greek lookalike letters and synonyms, and the egress filter with reversed or hex-encoded secrets. A real adversary can try far more than 14 mutators. The attacker here is also weak (no better than blind mutation).
+3. **Deterministic filters in general.** Every deterministic filter can be bypassed by an input it was not written for. They raise cost and catch the known; they are not a boundary.
+4. **Discussing an attack versus carrying one.** All 3 benign false positives are security writing that quotes an injection phrase, a tool-call syntax or a delimiter tag. Pattern screens cannot separate the two.
+5. **Leaks to an allowed destination.** The tool policy allows a post to the team channel; only the egress filter catches a secret in it, and only in the encodings it checks.
+6. **Spotlighting on a real model.** Its measured benefit is by construction of the simulated target. Whether it helps any real model is not measured here.
+7. **Semantic harm inside a permitted action.** A legitimate-looking forward to an allowed internal recipient is allowed, whatever the content.
+8. **Confidentiality of the notes themselves.** The agent may read private notes. Nothing here stops reading, only some forms of leaving.
+9. **Tampering by someone with file access.** Anyone who can rewrite the whole audit file can rebuild a consistent chain; the head hash is not anchored elsewhere.
+10. **Anything about real LLM behaviour.** Not measured. The gullible target is a model of gullibility I wrote.
+
+## Limits of the simulation
+
+- **Compliance probabilities are author-set guesses** (per technique, per goal, per spotlight). They are documented in `SusceptibilityProfile` and recorded in `evals/results/baseline.json`.
+- **The target's parser and the attack templates were written together.** With every probability set to 1, all 55 base attacks succeed (this is how I checked the parser reaches every attack); that shows the parser matches the templates, not that a real model would parse them.
+- **Corpus authorship bias.** Attacks, benign mail, default rules and the profile come from one author. The default screen was written knowing the corpus, so its 8.7% ASR is optimistic.
+- **Small benign set.** 72 messages, 18 in the test split.
+- **Shared goal wording** across families (3 paraphrases per goal) can inflate cross-family generalisation; E3 in the generalisation eval reduces but does not remove it.
+- **Latency** is in-process on one machine and excludes any model call.
