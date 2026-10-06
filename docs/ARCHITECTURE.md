@@ -1,6 +1,6 @@
 # Architecture
 
-Everything runs against a **simulated** sandbox (synthetic inbox, fake tools, fake canary secrets). The default target is a **simulation**; a real model can be plugged in as target (run once, by hand) or as attacker (built, never run), only through optional, guarded entry points. The sandbox has no network and no real system behind it. Attacks target only this project's own sandbox.
+Everything runs against a **simulated** sandbox (synthetic inbox, fake tools, fake canary secrets). The default target is a **simulation**; a real model can be plugged in as target (run once, by hand) or as attacker (built; only a 1-campaign smoke test run), only through optional, guarded entry points. The sandbox has no network and no real system behind it. Attacks target only this project's own sandbox.
 
 ## Flow of one attack run
 
@@ -50,7 +50,7 @@ sequenceDiagram
 | Attacks | `attacks/corpus.py` | 11 technique families x 5 goals = 55 base attacks; 3 goal paraphrases |
 | | `attacks/mutators.py` | 14 seeded mutators (lookalikes, zero-width, synonyms, framing, encodings, secret re-encoding, re-paraphrase) |
 | | `attacks/attackers.py` | `Attacker` protocol; `ScriptedAttacker`, `MutatingAttacker` (adaptive), `BlindMutator` (control) |
-| | `attacks/llm_attacker.py` | `LLMAttacker`: pydantic-ai Agent, structured `AttackSpec` output, prompt with goals, task and feedback; a refusal is a result. **Built, offline-tested only, not run live** |
+| | `attacks/llm_attacker.py` | `LLMAttacker`: pydantic-ai Agent, structured `AttackSpec` output, prompt with goals, task and feedback; a refusal and a non-output are distinct recorded results (non-output gets one corrective retry). **Built and offline-tested; full experiment not yet run** |
 | | `attacks/feedback.py` | What the attacker may see after a round (no hidden fields, canaries withheld); `Generation`; draft to `Attack` |
 | | `attacks/guardrails.py` | Deterministic validator for every generated attack: reserved domains, key-like strings, canary marker, phone and IP, real organisations, length, technique set |
 | | `attacks/campaign.py` | Campaign loop (R rounds, stop at first success), `Budget`, `KillSwitch`, `BlindSource` control, per-round audit records and spans |
@@ -78,7 +78,7 @@ sequenceDiagram
 | `guard` | EgressFilter | secret patterns in arguments | reversed or hex secrets by default; forwards or deletes of ordinary mail |
 | `finalize_output` | EgressFilter | secret patterns and images in the answer | the same encodings |
 
-## Adaptive campaign flow (built, offline-tested only, not run live)
+## Adaptive campaign flow (built, offline-tested; full experiment not yet run)
 
 ```mermaid
 flowchart LR
