@@ -15,7 +15,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# LLMTarget only. Built and tested with pydantic-ai's TestModel, never run live here.
+# LLMTarget (run once live) and LLMAttacker (never run live). Tested offline with pydantic-ai's TestModel and FunctionModel.
 llm = ["pydantic-ai-slim[anthropic]>=1.0"]
 dev = [
   "pytest>=8",
