@@ -25,6 +25,7 @@ from ..audit import AuditLog
 from ..defenses import DefenseStack
 from ..harness import RunConfig, TargetFactory, run_attack
 from ..models import GOALS, Attack
+from ..retry import CallFailed, Retrier, describe_error, error_headline
 from ..sandbox import make_canaries
 from .attackers import BlindMutator
 from .corpus import base_corpus
@@ -36,7 +37,8 @@ WASTED_OUTCOMES = ("attacker_refused", "attacker_no_structured_output", "attack_
 DEFAULT_ATTACKER_RETRIES = 1
 EXIT_OK, EXIT_BUDGET, EXIT_KILL, EXIT_ERROR = 0, 3, 4, 5
 ABORT_EXIT = {"budget_attacker_calls": EXIT_BUDGET, "budget_target_runs": EXIT_BUDGET,
-              "kill_switch": EXIT_KILL, "attacker_error": EXIT_ERROR, "target_error": EXIT_ERROR}
+              "kill_switch": EXIT_KILL, "attacker_error": EXIT_ERROR, "target_error": EXIT_ERROR,
+              "api_retry_cap": EXIT_ERROR}
 
 
 # ---- guards ------------------------------------------------------------------------------
@@ -142,6 +144,7 @@ class RoundRecord:
     refusal_text: str = ""             # clipped raw attacker text for a refusal OR a non-output
     attacker_calls: int = 0            # model calls this round used, retries included (0 for the blind control)
     retries: int = 0                   # of which corrective retries
+    api_retries: int = 0               # transient-API-error retries of the same logical call (NOT counted as calls/runs)
     first_attempt_text: str = ""       # clipped raw text of the first non-output, when a retry happened
     attacker_tokens: dict | None = None
     target_tokens: dict | None = None
@@ -163,6 +166,8 @@ class CampaignResult:
     status: str = "exhausted"          # success | exhausted | aborted
     abort_reason: str | None = None
     abort_detail: str = ""
+    abort_error: dict | None = None    # describe_error() output when an API error aborted the campaign
+    api_retries: int = 0               # transient retries in this campaign, aborted round included
 
     @property
     def success(self) -> bool:
@@ -183,6 +188,7 @@ class CampaignResult:
                 "attacker_model": self.attacker_model, "target": self.target, "seed": self.seed,
                 "rounds_planned": self.rounds_planned, "status": self.status,
                 "abort_reason": self.abort_reason, "abort_detail": self.abort_detail,
+                "abort_error": self.abort_error, "api_retries": self.api_retries,
                 "first_success_round": self.first_success_round,
                 "all_rounds_wasted": self.all_rounds_wasted,
                 "rounds": [r.to_dict() for r in self.rounds]}
@@ -211,9 +217,14 @@ def _no_output(gen: Generation) -> bool:
 def run_campaign(goal: str, source: AttackSource, factory: TargetFactory, stack: DefenseStack,
                  cfg: RunConfig, *, rounds: int = 8, budget: Budget, campaign_id: str,
                  condition: str = "", audit: AuditLog | None = None, kill: KillSwitch | None = None,
-                 attacker_retries: int = DEFAULT_ATTACKER_RETRIES) -> CampaignResult:
+                 attacker_retries: int = DEFAULT_ATTACKER_RETRIES, retrier: Retrier | None = None
+                 ) -> CampaignResult:
     """`attacker_retries`: corrective retries per round when the attacker returns no structured output
-    (never after a genuine refusal). Each retry is a model call counted against the budget."""
+    (never after a genuine refusal). Each retry is a model call counted against the budget.
+    `retrier`: when given, every attacker call and target run goes through it, so a transient API error is
+    retried with backoff WITHOUT counting as a new call/run against the budget (it is counted in
+    `api_retries`); a permanent error aborts at once with a detailed `abort_error`. Without one, any
+    exception aborts the campaign as before."""
     if goal not in GOALS:
         raise ValueError(f"unknown goal {goal!r}; choose from {GOALS}")
     kill = kill or KILL
@@ -231,14 +242,38 @@ def run_campaign(goal: str, source: AttackSource, factory: TargetFactory, stack:
             "defenses": defenses, "attack": attack.to_dict() if attack else None,
             "draft": ({"technique": rec.technique, "subject": rec.subject, "body": rec.body,
                        "rationale": rec.rationale} if attack is None and rec.technique else None),
-            "attacker_calls": rec.attacker_calls, "retries": rec.retries,
+            "attacker_calls": rec.attacker_calls, "retries": rec.retries, "api_retries": out.api_retries - ar0,
             "outcome": {"outcome": rec.outcome, "blocked_by": rec.blocked_by, "violations": rec.violations,
                         "refusal_text": rec.refusal_text, "output_sha256": output_sha},
             "tool_names": rec.tool_names, "attacker_tokens": rec.attacker_tokens,
             "target_tokens": rec.target_tokens})
 
-    def abort(reason: str, detail: str = "") -> None:
-        out.status, out.abort_reason, out.abort_detail = "aborted", reason, detail
+    def abort(reason: str, detail: str = "", error: dict | None = None) -> None:
+        out.status, out.abort_reason, out.abort_detail, out.abort_error = "aborted", reason, detail, error
+
+    def guarded(fn, label: str):
+        """Run one logical call; returns its value. Raises CallFailed (retrier) or the raw exception (none)."""
+        if retrier is None:
+            return fn()
+
+        def note(ev: dict) -> None:
+            out.api_retries += 1
+            if audit is not None:
+                audit.append("api_retry", {"campaign_id": campaign_id, "condition": condition, "goal": goal,
+                                           "call": label, **{k: ev[k] for k in ("attempt", "next_attempt", "delay_s",
+                                                                                  "error")}})
+        return retrier.call(fn, label=label, kill=kill, on_retry=note)
+
+    def fail(exc: Exception, who: str) -> None:
+        """Turn a failed logical call into an abort with full, redacted detail."""
+        if isinstance(exc, CallFailed):
+            info = exc.info
+            reason = {"api_permanent": f"{who}_error", "api_retries_exhausted": f"{who}_error",
+                      "api_retry_cap": "api_retry_cap", "kill_switch": "kill_switch"}[exc.reason]
+            abort(reason, f"{exc.detail}: {error_headline(info)}", {**info, "abort_cause": exc.reason, "call": who})
+        else:
+            info = describe_error(exc, attempts=1)
+            abort(f"{who}_error", error_headline(info), {**info, "abort_cause": "no_retrier", "call": who})
 
     with tracing.span("campaign", goal=goal, condition=condition, attacker_model=source.label,
                       target=cfg.target, campaign_id=campaign_id, rounds_planned=rounds) as csp:
@@ -255,6 +290,7 @@ def run_campaign(goal: str, source: AttackSource, factory: TargetFactory, stack:
                 break
             with tracing.span("round", round=n, goal=goal, condition=condition) as rsp:
                 calls = retries = tin = tout = 0
+                ar0 = out.api_retries
                 first_text = ""
                 try:
                     while True:
@@ -263,8 +299,9 @@ def run_campaign(goal: str, source: AttackSource, factory: TargetFactory, stack:
                             calls += 1
                         with tracing.span("attacker_call", model=source.label, round=n, goal=goal,
                                           retry=retries > 0) as asp:
-                            gen = (source.next(goal, n, rounds, feedback, corrective=True) if retries
-                                   else source.next(goal, n, rounds, feedback))
+                            corrective = retries > 0
+                            gen = guarded(lambda: source.next(goal, n, rounds, feedback, corrective=True) if corrective
+                                          else source.next(goal, n, rounds, feedback), "attacker")
                             tin += gen.input_tokens
                             tout += gen.output_tokens
                             tracing.set_attrs(asp, refused=gen.refused, input_tokens=gen.input_tokens,
@@ -282,7 +319,7 @@ def run_campaign(goal: str, source: AttackSource, factory: TargetFactory, stack:
                                 "reason": "attacker_no_structured_output",
                                 "previous_text": _clip(gen.refusal_text, 300)})
                 except Exception as exc:             # auth, network, quota: stop cleanly, keep partials
-                    abort("attacker_error", f"{type(exc).__name__}: {_clip(str(exc), 200)}")
+                    fail(exc, "attacker")
                     break
                 atokens = {"input": tin, "output": tout} if source.uses_model else None
                 if gen.draft is None and gen.attack is None:
@@ -295,6 +332,7 @@ def run_campaign(goal: str, source: AttackSource, factory: TargetFactory, stack:
                                                   note=(gen.refusal_text or "no output") if refused else ""))
                     audit_round(rec, None)
                     tracing.set_attrs(rsp, outcome=rec.outcome, attacker_calls=calls, retries=retries)
+                    rec.api_retries = out.api_retries - ar0
                     out.rounds.append(rec)
                     continue
                 attack = gen.attack
@@ -309,6 +347,7 @@ def run_campaign(goal: str, source: AttackSource, factory: TargetFactory, stack:
                                                       "attack_rejected", note="; ".join(bad)))
                         audit_round(rec, None)
                         tracing.set_attrs(rsp, outcome=rec.outcome)
+                        rec.api_retries = out.api_retries - ar0
                         out.rounds.append(rec)
                         continue
                     attack = draft_to_attack(d, goal, f"llm/{campaign_id}/r{n}", n)
@@ -316,9 +355,12 @@ def run_campaign(goal: str, source: AttackSource, factory: TargetFactory, stack:
                 box: list = []
                 budget.target_runs += 1
                 try:
-                    res = run_attack(attack, n, stack, _capturing(factory, box), cfg, None)
+                    def run_once():
+                        box.clear()          # a retried run starts clean (fresh sandbox inside run_attack)
+                        return run_attack(attack, n, stack, _capturing(factory, box), cfg, None)
+                    res = guarded(run_once, "target")
                 except Exception as exc:
-                    abort("target_error", f"{type(exc).__name__}: {_clip(str(exc), 200)}")
+                    fail(exc, "target")
                     break
                 usage = (box[-1].get("usage") if box else None)
                 rec = RoundRecord(
@@ -330,6 +372,7 @@ def run_campaign(goal: str, source: AttackSource, factory: TargetFactory, stack:
                 audit_round(rec, attack, hashlib.sha256(res.output_text.encode()).hexdigest())
                 tracing.set_attrs(rsp, outcome=rec.outcome, technique=attack.technique,
                                   blocked_by=res.blocked_by or "none")
+                rec.api_retries = out.api_retries - ar0
                 out.rounds.append(rec)
                 if res.success:
                     out.status = "success"
@@ -340,6 +383,7 @@ def run_campaign(goal: str, source: AttackSource, factory: TargetFactory, stack:
         audit.append("campaign_end", {"campaign_id": campaign_id, "condition": condition, "goal": goal,
                                       "attacker_model": source.label, "target": cfg.target,
                                       "status": out.status, "abort_reason": out.abort_reason,
+                                      "abort_error": out.abort_error, "api_retries": out.api_retries,
                                       "rounds_run": len(out.rounds),
                                       "first_success_round": out.first_success_round})
     return out
