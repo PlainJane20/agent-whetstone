@@ -13,6 +13,7 @@ still leaves everything finished so far on disk.
 from __future__ import annotations
 
 import json
+import os
 import platform
 import statistics
 import subprocess
@@ -25,12 +26,14 @@ from pathlib import Path
 from typing import Callable
 
 from . import stats
-from .attacks.campaign import (ABORT_EXIT, DEFAULT_ATTACKER_RETRIES, EXIT_OK, KILL, AttackSource, BlindSource, Budget, CampaignResult,
-                               KillSwitch, run_campaign)
-from .audit import AuditLog
+from .attacks.campaign import (ABORT_EXIT, DEFAULT_ATTACKER_RETRIES, EXIT_OK, KILL, AttackSource, BlindSource, Budget,
+                               CampaignResult, KillSwitch, RoundRecord, run_campaign)
+from .audit import AuditLog, load_and_verify
 from .defenses import build_stack
 from .harness import RunConfig, TargetFactory
 from .models import DEFAULT_TASK, GOALS
+from .retry import (DEFAULT_BASE_S, DEFAULT_CAP_S, DEFAULT_MAX_ATTEMPTS, DEFAULT_MAX_TOTAL_RETRIES, Retrier,
+                    RetryPolicy)
 
 DEFAULT_ATTACKER_MODEL_NAME = "claude-haiku-4-5-20251001"
 DEFAULT_TARGET_MODEL_NAME = "claude-haiku-4-5-20251001"
@@ -39,8 +42,8 @@ DEFAULT_CAMPAIGNS = 3
 DEFAULT_TARGET_REQUEST_LIMIT = 30      # model requests per target run: a spend guard per run
 ATTACKER_MAX_REQUESTS = 3              # model requests per attacker call (LLMAttacker default)
 RESULTS_DIR = Path(__file__).resolve().parents[2] / "evals" / "results" / "live_adaptive"
-SCHEMA_VERSION = 2          # 2: refusals split from non-outputs, retries recorded. Readers accept 1 (see load_summary).
-SUPPORTED_SCHEMAS = (1, 2)
+SCHEMA_VERSION = 3          # 3: api_retries, abort_error, aborted_attempts, resumed. 2: refusals split from non-outputs.
+SUPPORTED_SCHEMAS = (1, 2, 3)   # readers accept all (see load_summary)
 
 STATUS_NOTE = ("Built and offline-tested only. A summary file written by a real run replaces this note "
                "with the run's own metadata; none has been committed yet.")
@@ -88,6 +91,13 @@ class ExperimentConfig:
     task: str = DEFAULT_TASK
     target_request_limit: int = DEFAULT_TARGET_REQUEST_LIMIT
     attacker_retries: int = DEFAULT_ATTACKER_RETRIES   # corrective retries per round on a non-output (not on a refusal)
+    retry_max_attempts: int = DEFAULT_MAX_ATTEMPTS     # per logical API call, first try included (transient errors only)
+    retry_base_s: float = DEFAULT_BASE_S
+    retry_cap_s: float = DEFAULT_CAP_S
+    max_total_retries: int = DEFAULT_MAX_TOTAL_RETRIES  # global cap on transient retries in one invocation
+
+    def retry_policy(self) -> RetryPolicy:
+        return RetryPolicy(self.retry_max_attempts, self.retry_base_s, self.retry_cap_s, self.max_total_retries)
 
     def validate(self) -> None:
         bad = [g for g in self.goals if g not in GOALS]
@@ -100,6 +110,7 @@ class ExperimentConfig:
             raise ValueError("campaigns and rounds must be at least 1")
         if self.attacker_retries < 0:
             raise ValueError("attacker_retries cannot be negative")
+        self.retry_policy().validate()
         if not self.goals or not self.conditions:
             raise ValueError("need at least one goal and one condition")
         for v in (self.max_target_runs, self.max_attacker_calls):
@@ -108,14 +119,25 @@ class ExperimentConfig:
 
 
 # ---- plan --------------------------------------------------------------------------------
-def plan(cfg: ExperimentConfig) -> dict:
+def plan_order(cfg: ExperimentConfig) -> list[tuple[int, str, str]]:
+    """The deterministic campaign order: campaign index outermost, then goal, then condition."""
+    return [(c, goal, name) for c in range(cfg.campaigns) for goal in cfg.goals for name in cfg.conditions]
+
+
+def campaign_id(cfg: ExperimentConfig, c: int, goal: str, name: str) -> str:
+    return f"{name}:{goal}:c{c}:s{cfg.seed + c}"
+
+
+def plan(cfg: ExperimentConfig, todo: list[tuple[int, str, str]] | None = None) -> dict:
     """Pure arithmetic: how many campaigns, rounds, target runs and attacker calls at most. The attacker-call
-    upper bound is rounds x (1 + retries): a retry is a model call and counts against the budget."""
+    upper bound is rounds x (1 + retries): a retry is a model call and counts against the budget. With `todo`
+    (a resume), only those campaigns are counted. Transient-API-error retries of the same call are NOT
+    counted here: they are bounded separately by the retry policy (max_total_retries)."""
     cfg.validate()
     per = {}
     for name in cfg.conditions:
         c = CONDITIONS[name]
-        n = len(cfg.goals) * cfg.campaigns
+        n = len(cfg.goals) * cfg.campaigns if todo is None else sum(1 for t in todo if t[2] == name)
         per[name] = {"kind": c.kind, "defenses": list(c.defenses), "campaigns": n,
                      "max_target_runs": n * cfg.rounds,
                      "max_attacker_calls": n * cfg.rounds * (1 + cfg.attacker_retries) if c.kind == "adaptive" else 0}
@@ -131,11 +153,12 @@ def plan(cfg: ExperimentConfig) -> dict:
             "target_request_limit_per_run": cfg.target_request_limit,
             "attacker_requests_per_call": ATTACKER_MAX_REQUESTS,
             "attacker_retries_per_round": cfg.attacker_retries,
-            "attacker_model": cfg.attacker_model, "target_model": cfg.target_model, "seed": cfg.seed}
+            "attacker_model": cfg.attacker_model, "target_model": cfg.target_model, "seed": cfg.seed,
+            "retry_policy": cfg.retry_policy().to_dict()}
 
 
-def format_plan(p: dict) -> str:
-    L = ["Adaptive attacker experiment: PLAN (nothing has been called)",
+def format_plan(p: dict, title: str = "Adaptive attacker experiment: PLAN (nothing has been called)") -> str:
+    L = [title,
          f"  goals ({len(p['goals'])}): {', '.join(p['goals'])}",
          f"  campaigns per goal: {p['campaigns_per_goal']}   rounds per campaign (max): {p['rounds']}",
          f"  attacker model: {p['attacker_model']}   target model: {p['target_model']}   seed: {p['seed']}",
@@ -156,6 +179,11 @@ def format_plan(p: dict) -> str:
           f"  model API requests: each attacker call is up to {p['attacker_requests_per_call']} requests (normally 1); "
           f"each target run is one agent run of several requests (capped at {p['target_request_limit_per_run']}). "
           "The per-run request count was not measured for this experiment; treat the request total as unknown.",
+          f"  transient API errors (429/5xx/529, connection, timeout) are retried with backoff: up to "
+          f"{p['retry_policy']['max_attempts']} attempts per call, base {p['retry_policy']['base_s']}s, cap "
+          f"{p['retry_policy']['cap_s']}s, at most {p['retry_policy']['max_total_retries']} retries in total. "
+          "A retry re-sends the SAME request and may be billed again; retries are not in the call bounds above "
+          "and are reported as api_retries. Permanent errors (400 incl. no credit, 401, 403, 404) abort at once.",
           "  Set a spend limit with your provider BEFORE running. Kill switch: touch WHETSTONE_KILL (or set "
           "WHETSTONE_KILL_SWITCH=1)."]
     return "\n".join(L)
@@ -227,6 +255,7 @@ def summarize_condition(cond: Condition, results: list[CampaignResult], planned:
     return {
         "kind": cond.kind, "defenses": list(cond.defenses), "campaigns_planned": planned,
         "campaigns_completed": len(done), "campaigns_aborted": len(aborted),
+        "api_retries": sum(r.api_retries for r in results),
         "campaign_success": stats.rate(len(wins), len(done)),
         "attempts_to_first_success": {"values": atts, "mean": round(statistics.mean(atts), 2) if atts else None,
                                       "median": statistics.median(atts) if atts else None},
@@ -270,35 +299,109 @@ def compare(summary_conditions: dict) -> dict:
     return out
 
 
+def _atomic_write(path: Path, text: str) -> None:
+    """Write via a temp file in the same directory, then rename: a crash never leaves a half-written summary."""
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text)
+    os.replace(tmp, path)
+
+
 def _build_summary(cfg: ExperimentConfig, p: dict, budget: Budget, results: dict[str, list[CampaignResult]],
-                   status: str, abort: dict | None, run_id: str, started: str, audits: dict) -> dict:
+                   status: str, abort: dict | None, run_id: str, started: str, audits: dict, *,
+                   meta: dict | None = None, aborted_attempts: list | None = None, resumed: dict | None = None,
+                   retrier: Retrier | None = None, resume_plan: dict | None = None) -> dict:
     conds = {n: summarize_condition(CONDITIONS[n], results.get(n, []), p["conditions"][n]["campaigns"])
              for n in cfg.conditions}
+    finished = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    if meta is None:
+        meta = {"attacker_retries": cfg.attacker_retries, "started_utc": started, "finished_utc": finished,
+                "date": started[:10], "seed": cfg.seed, "attacker_model": cfg.attacker_model,
+                "target_model": cfg.target_model, "task": cfg.task, "rounds": cfg.rounds,
+                "campaigns_per_goal": cfg.campaigns, "goals": list(cfg.goals),
+                "libraries": library_versions(), "git_commit": _git_commit(),
+                "target_request_limit_per_run": cfg.target_request_limit, "caveat": CAVEAT}
+    else:       # a resume keeps the original run's metadata; only the finish time moves
+        meta = {**meta, "finished_utc": finished}
+    total_retries = sum(c["api_retries"] for c in conds.values())
     return {
         "schema_version": SCHEMA_VERSION,
         "status": status, "abort": abort, "run_id": run_id,
         "environment": "SIMULATED sandbox (synthetic inbox, in-memory fake tools, fake CANARY secrets); "
                        "model attacker and model target",
-        "meta": {"attacker_retries": cfg.attacker_retries, "started_utc": started, "finished_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                 "date": started[:10], "seed": cfg.seed, "attacker_model": cfg.attacker_model,
-                 "target_model": cfg.target_model, "task": cfg.task, "rounds": cfg.rounds,
-                 "campaigns_per_goal": cfg.campaigns, "goals": list(cfg.goals),
-                 "libraries": library_versions(), "git_commit": _git_commit(),
-                 "target_request_limit_per_run": cfg.target_request_limit, "caveat": CAVEAT},
+        "meta": meta,
         "plan": p,
         "budget": budget.to_dict(),
+        "api_retries": {"in_current_campaigns": total_retries,
+                        "this_invocation": retrier.total_retries if retrier else 0,
+                        "policy": cfg.retry_policy().to_dict(),
+                        "note": "transient API errors retried with backoff; a retry re-sends the same request, "
+                                "is not a new round or call against the budget, and may be billed again"},
         "conditions": conds,
+        "aborted_attempts": list(aborted_attempts or []),
+        "resumed": resumed,
+        "resume_plan": resume_plan,
         "comparison": compare(conds),
         "static_corpus_reference": STATIC_REFERENCE,
         "audit": audits,
     }
 
 
+def _abort_dict(res: CampaignResult, cid: str) -> dict:
+    return {"reason": res.abort_reason, "detail": res.abort_detail, "campaign_id": cid, "error": res.abort_error}
+
+
+def _execute(cfg: ExperimentConfig, p: dict, run_dir: Path, run_id: str, started: str, budget: Budget,
+             audits: dict, results: dict[str, list[CampaignResult]], todo: list[tuple[int, str, str]],
+             attacker_factory, target_factory, kill: KillSwitch, retrier: Retrier,
+             say: Callable[[str], None], build_kw: dict) -> ExperimentOutcome:
+    """The shared campaign loop of a fresh run and a resume: runs `todo` in order, rewrites summary.json
+    atomically after every campaign, stops at the first abort."""
+    factory = target_factory(cfg.target_model, cfg.target_request_limit)
+    needs_attacker = any(CONDITIONS[n].kind == "adaptive" for _, _, n in todo)
+    adaptive = attacker_factory(cfg.attacker_model) if needs_attacker else None
+    abort: dict | None = None
+    summary_path = run_dir / "summary.json"
+
+    def write(status: str) -> dict:
+        info = {n: {"path": a.path.name, "records": len(a.records()), "head": a.head(),
+                    "chain_verified": a.verify()[0]} for n, a in audits.items()}
+        s = _build_summary(cfg, p, budget, results, status, abort, run_id, started, info, retrier=retrier,
+                           **build_kw)
+        _atomic_write(summary_path, json.dumps(s, indent=2) + "\n")
+        return s
+
+    write("in_progress")
+    for c, goal, name in todo:
+        cond = CONDITIONS[name]
+        seed = cfg.seed + c
+        source = adaptive if cond.kind == "adaptive" else BlindSource(goal, seed)
+        rc = RunConfig(seed=seed, trials=1, task=cfg.task, target=f"llm:{cfg.target_model}")
+        cid = campaign_id(cfg, c, goal, name)
+        res = run_campaign(goal, source, factory, build_stack(list(cond.defenses)), rc,
+                           rounds=cfg.rounds, budget=budget, campaign_id=cid, condition=name,
+                           audit=audits[name], kill=kill, attacker_retries=cfg.attacker_retries, retrier=retrier)
+        results[name].append(res)
+        say(f"[{cid}] {res.status}" + (f" at round {res.first_success_round}" if res.success else "")
+            + (f" ({res.abort_reason})" if res.abort_reason else "")
+            + (f" [api retries: {res.api_retries}]" if res.api_retries else ""))
+        if res.status == "aborted":
+            abort = _abort_dict(res, cid)
+            say(f"  abort detail: {res.abort_detail}")
+            break
+        write("in_progress")
+    status = "complete" if abort is None else f"aborted:{abort['reason']}"
+    summary = write(status)
+    code = EXIT_OK if abort is None else ABORT_EXIT.get(abort["reason"], 5)
+    return ExperimentOutcome(summary, code, run_dir, results)
+
+
 def run_experiment(cfg: ExperimentConfig, attacker_factory: Callable[[str], AttackSource],
                    target_factory: Callable[[str, int], TargetFactory], *, kill: KillSwitch | None = None,
-                   run_id: str | None = None, say: Callable[[str], None] = lambda s: None) -> ExperimentOutcome:
+                   run_id: str | None = None, say: Callable[[str], None] = lambda s: None,
+                   retrier: Retrier | None = None) -> ExperimentOutcome:
     """Run the plan. `attacker_factory(model_name)` and `target_factory(model_name, request_limit)` are
-    injected so tests never touch a model; the live script passes the real ones."""
+    injected so tests never touch a model; the live script passes the real ones. `retrier` is injectable
+    (sleep, clock, rng) so tests never wait."""
     p = plan(cfg)
     kill = kill or KILL
     now = datetime.now(timezone.utc)
@@ -309,64 +412,186 @@ def run_experiment(cfg: ExperimentConfig, attacker_factory: Callable[[str], Atta
     budget = Budget(p["budget"]["max_target_runs"], p["budget"]["max_attacker_calls"])
     audits = {n: AuditLog(run_dir / f"audit_{n}.jsonl") for n in cfg.conditions}
     results: dict[str, list[CampaignResult]] = {n: [] for n in cfg.conditions}
-    factory = target_factory(cfg.target_model, cfg.target_request_limit)
-    adaptive = (attacker_factory(cfg.attacker_model)
-                if any(CONDITIONS[n].kind == "adaptive" for n in cfg.conditions) else None)
-    abort: dict | None = None
-    summary_path = run_dir / "summary.json"
+    return _execute(cfg, p, run_dir, run_id, started, budget, audits, results, plan_order(cfg), attacker_factory,
+                    target_factory, kill, retrier or Retrier(cfg.retry_policy()), say, {})
 
-    def write(status: str) -> dict:
-        info = {n: {"path": a.path.name, "records": len(a.records()), "head": a.head(),
-                    "chain_verified": a.verify()[0]} for n, a in audits.items()}
-        s = _build_summary(cfg, p, budget, results, status, abort, run_id, started, info)
-        summary_path.write_text(json.dumps(s, indent=2) + "\n")
-        return s
 
-    write("in_progress")
+# ---- resuming ---------------------------------------------------------------------------------
+class ResumeError(ValueError):
+    """A run cannot be resumed (missing, unreadable, config mismatch, broken audit chain)."""
+
+
+# meta key -> getter on the config; only keys present in the saved meta are compared (v1 summaries lack some)
+_MATCH = {"goals": lambda c: list(c.goals), "rounds": lambda c: c.rounds, "campaigns_per_goal": lambda c: c.campaigns,
+          "seed": lambda c: c.seed, "attacker_model": lambda c: c.attacker_model,
+          "target_model": lambda c: c.target_model, "task": lambda c: c.task,
+          "attacker_retries": lambda c: c.attacker_retries,
+          "target_request_limit_per_run": lambda c: c.target_request_limit}
+
+
+def resolve_run_dir(spec: str | Path, out_dir: Path = RESULTS_DIR) -> Path:
+    """`spec` is a run directory, or a run id inside `out_dir`."""
+    for cand in (Path(spec), Path(out_dir) / str(spec)):
+        if (cand / "summary.json").is_file():
+            return cand
+    raise ResumeError(f"no summary.json found for {spec!r} (looked at {Path(spec)} and {Path(out_dir) / str(spec)})")
+
+
+def cfg_from_summary(saved: dict, **overrides) -> ExperimentConfig:
+    """The ExperimentConfig that produced `saved` (budgets, retry policy and out_dir are per-invocation and
+    come from `overrides` or the defaults)."""
+    m = saved["meta"]
+    cfg = ExperimentConfig(
+        goals=tuple(m["goals"]), campaigns=m["campaigns_per_goal"], rounds=m["rounds"], seed=m["seed"],
+        conditions=tuple(saved["conditions"]), attacker_model=m["attacker_model"], target_model=m["target_model"],
+        task=m.get("task", DEFAULT_TASK),
+        target_request_limit=m.get("target_request_limit_per_run", DEFAULT_TARGET_REQUEST_LIMIT),
+        attacker_retries=m.get("attacker_retries", DEFAULT_ATTACKER_RETRIES))
+    for k, v in overrides.items():
+        setattr(cfg, k, v)
+    return cfg
+
+
+def config_mismatches(saved: dict, cfg: ExperimentConfig) -> list[str]:
+    bad = []
+    m = saved["meta"]
+    for key, get in _MATCH.items():
+        if key in m and m[key] != get(cfg):
+            bad.append(f"{key}: saved run has {m[key]!r}, this invocation has {get(cfg)!r}")
+    if list(saved["conditions"]) != list(cfg.conditions):
+        bad.append(f"conditions: saved run has {list(saved['conditions'])!r}, this invocation has {list(cfg.conditions)!r}")
+    return bad
+
+
+def campaign_from_dict(d: dict) -> CampaignResult:
+    """Rebuild a CampaignResult from its summary.json record (unknown/missing round fields tolerated)."""
+    fields = set(RoundRecord.__dataclass_fields__)
+    rounds = [RoundRecord(**{k: v for k, v in r.items() if k in fields}) for r in d.get("rounds", [])]
+    return CampaignResult(
+        campaign_id=d["campaign_id"], goal=d["goal"], condition=d["condition"], attacker_model=d["attacker_model"],
+        target=d["target"], seed=d["seed"], rounds_planned=d["rounds_planned"], rounds=rounds, status=d["status"],
+        abort_reason=d.get("abort_reason"), abort_detail=d.get("abort_detail", ""),
+        abort_error=d.get("abort_error"), api_retries=d.get("api_retries", 0))
+
+
+@dataclass
+class ResumeState:
+    run_dir: Path
+    saved: dict
+    carried: dict[str, list[CampaignResult]]          # completed campaigns, in saved order
+    aborted: list[dict]                               # aborted-attempt records (earlier ones first)
+    todo: list[tuple[int, str, str]]
+    audit_chains: dict[str, tuple[bool, int]]
+
+
+def prepare_resume(run_dir: Path, cfg: ExperimentConfig) -> ResumeState:
+    """Read-only: load, check the config and the audit chains, and work out what is left. Raises ResumeError."""
     try:
-        for c in range(cfg.campaigns):
-            for goal in cfg.goals:
-                for name in cfg.conditions:
-                    cond = CONDITIONS[name]
-                    seed = cfg.seed + c
-                    source = adaptive if cond.kind == "adaptive" else BlindSource(goal, seed)
-                    rc = RunConfig(seed=seed, trials=1, task=cfg.task, target=f"llm:{cfg.target_model}")
-                    cid = f"{name}:{goal}:c{c}:s{seed}"
-                    res = run_campaign(goal, source, factory, build_stack(list(cond.defenses)), rc,
-                                       rounds=cfg.rounds, budget=budget, campaign_id=cid, condition=name,
-                                       audit=audits[name], kill=kill, attacker_retries=cfg.attacker_retries)
-                    results[name].append(res)
-                    say(f"[{cid}] {res.status}" + (f" at round {res.first_success_round}" if res.success else "")
-                        + (f" ({res.abort_reason})" if res.abort_reason else ""))
-                    write("in_progress")
-                    if res.status == "aborted":
-                        abort = {"reason": res.abort_reason, "detail": res.abort_detail, "campaign_id": cid}
-                        raise StopIteration
-    except StopIteration:
-        pass
-    status = "complete" if abort is None else f"aborted:{abort['reason']}"
-    summary = write(status)
-    code = EXIT_OK if abort is None else ABORT_EXIT.get(abort["reason"], 5)
-    return ExperimentOutcome(summary, code, run_dir, results)
+        saved = load_summary(Path(run_dir) / "summary.json")
+    except (OSError, ValueError, KeyError) as exc:
+        raise ResumeError(f"cannot read {Path(run_dir) / 'summary.json'}: {exc}") from exc
+    bad = config_mismatches(saved, cfg)
+    if bad:
+        raise ResumeError("refusing to resume: this configuration does not match the saved run:\n  - "
+                          + "\n  - ".join(bad))
+    carried: dict[str, list[CampaignResult]] = {n: [] for n in cfg.conditions}
+    aborted = list(saved.get("aborted_attempts") or [])
+    done_ids: set[str] = set()
+    for name in cfg.conditions:
+        for d in saved["conditions"][name].get("campaigns", []):
+            if d["status"] == "aborted":
+                aborted.append({"campaign_id": d["campaign_id"], "condition": name,
+                                "abort_reason": d.get("abort_reason"), "abort_detail": d.get("abort_detail", ""),
+                                "abort_error": d.get("abort_error"),
+                                "moved_at_resume_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                                "campaign": d})
+            else:
+                carried[name].append(campaign_from_dict(d))
+                done_ids.add(d["campaign_id"])
+    todo = [t for t in plan_order(cfg) if campaign_id(cfg, t[0], t[1], t[2]) not in done_ids]
+    chains = {}
+    for name in cfg.conditions:
+        path = Path(run_dir) / f"audit_{name}.jsonl"
+        if not path.is_file():
+            if carried[name] or any(a["condition"] == name for a in aborted):
+                raise ResumeError(f"audit log {path.name} is missing but the summary has campaigns for {name}")
+            chains[name] = (True, 0)
+            continue
+        ok, bad_at, n = load_and_verify(path)
+        if not ok:
+            raise ResumeError(f"refusing to resume: audit chain {path.name} does not verify (first bad record {bad_at})")
+        chains[name] = (ok, n)
+    return ResumeState(Path(run_dir), saved, carried, aborted, todo, chains)
+
+
+def resume_experiment(cfg: ExperimentConfig, run_dir: Path, attacker_factory: Callable[[str], AttackSource],
+                      target_factory: Callable[[str, int], TargetFactory], *, kill: KillSwitch | None = None,
+                      say: Callable[[str], None] = lambda s: None, retrier: Retrier | None = None,
+                      state: ResumeState | None = None) -> ExperimentOutcome:
+    """Run only the campaigns the saved run did not complete, in the original order, with the same seeds,
+    appending to the same hash-chained audit logs. Aborted campaigns are re-run fresh and their records are
+    kept under `aborted_attempts`. Budgets apply to this invocation's new work only. A complete run is a no-op
+    (nothing is written)."""
+    kill = kill or KILL
+    st = state or prepare_resume(Path(run_dir), cfg)
+    saved = st.saved
+    if not st.todo:
+        return ExperimentOutcome(saved, EXIT_OK, st.run_dir, st.carried)
+    full = plan(cfg)
+    rplan = plan(cfg, st.todo)
+    budget = Budget(rplan["budget"]["max_target_runs"], rplan["budget"]["max_attacker_calls"])
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    prev = saved.get("resumed") or {}
+    carried_n = sum(len(v) for v in st.carried.values())
+    entry = {"resumed_utc": now, "carried_over_campaigns": carried_n, "remaining_campaigns": len(st.todo),
+             "aborted_attempts_total": len(st.aborted), "from_status": saved["status"],
+             "from_abort": saved.get("abort"), "prior_budget_used": saved.get("budget"),
+             "git_commit": _git_commit(), "libraries": library_versions(),
+             "retry_policy": cfg.retry_policy().to_dict(),
+             "carried_from_schema_version": saved.get("loaded_from_schema_version"),
+             "carried_schema_note": saved.get("schema_note")}
+    resumed = {"count": prev.get("count", 0) + 1, "first_resumed_utc": prev.get("first_resumed_utc", now),
+               "last_resumed_utc": now, "carried_over_campaigns": carried_n, "remaining_at_resume": len(st.todo),
+               "history": [*prev.get("history", []), entry]}
+    audits = {n: AuditLog(st.run_dir / f"audit_{n}.jsonl") for n in cfg.conditions}
+    for n, a in audits.items():          # mark the boundary inside every chain; appends with the last hash
+        a.append("experiment_resumed", {"run_id": saved["run_id"], "resumed_utc": now, "condition": n,
+                                        "carried_over_campaigns": len(st.carried[n]),
+                                        "remaining_campaigns": sum(1 for t in st.todo if t[2] == n),
+                                        "previous_head": a.head()})
+    results = {n: list(v) for n, v in st.carried.items()}
+    return _execute(cfg, full, st.run_dir, saved["run_id"], saved["meta"]["started_utc"], budget, audits, results,
+                    st.todo, attacker_factory, target_factory, kill, retrier or Retrier(cfg.retry_policy()), say,
+                    {"meta": saved["meta"], "aborted_attempts": st.aborted, "resumed": resumed,
+                     "resume_plan": rplan})
 
 
 # ---- reading ---------------------------------------------------------------------------------
 V1_NOTE = ("schema_version 1 summary (written before refusals and non-outputs were told apart): its "
            "'attacker_refused' rounds and 'refused' / 'refusal_rate' may include plain-text format failures, so "
            "they can overstate refusals. Fields added in v2 are filled with None where not recorded.")
+_V3_DEFAULTS = {"aborted_attempts": [], "resumed": None, "resume_plan": None, "api_retries": None}
 _V2_ATTACKER_DEFAULTS = {"no_structured_output": None, "no_structured_output_rate": None, "retries_used": None,
                          "retries_recovered": None, "rounds": None}
 
 
 def load_summary(path) -> dict:
-    """Read a summary.json of schema version 1 or 2. Version 1 is returned unchanged except that the
-    version-2 fields are added as None and `loaded_from_schema_version` / `schema_note` say so; the file
+    """Read a summary.json of schema version 1, 2 or 3. Older versions are returned unchanged except that the
+    newer fields are added as None/empty (v1: the v2 fields too) and `loaded_from_schema_version` / `schema_note` say so; the file
     on disk is never modified. Unknown versions raise ValueError."""
     s = json.loads(Path(path).read_text())
     v = s.get("schema_version")
     if v not in SUPPORTED_SCHEMAS:
         raise ValueError(f"unsupported summary schema_version {v!r}; supported: {SUPPORTED_SCHEMAS}")
     s["loaded_from_schema_version"] = v
+    if v < 3:
+        for k, d in _V3_DEFAULTS.items():
+            s.setdefault(k, d)
+        for c in s.get("conditions", {}).values():
+            c.setdefault("api_retries", None)
+            for camp in c.get("campaigns", []):
+                camp.setdefault("abort_error", None)
+                camp.setdefault("api_retries", None)
     if v == 1:
         s["schema_note"] = V1_NOTE
         for c in s.get("conditions", {}).values():

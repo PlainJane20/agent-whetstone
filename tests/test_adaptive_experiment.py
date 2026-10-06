@@ -88,7 +88,7 @@ def test_full_run_with_stubs_completes_and_writes_summary_and_three_audit_chains
         ok, bad, count = load_and_verify(d / f"audit_{n}.jsonl")
         assert ok and count > 0
     disk = json.loads((d / "summary.json").read_text())
-    assert disk["status"] == "complete" and disk["schema_version"] == 2
+    assert disk["status"] == "complete" and disk["schema_version"] == 3
 
 
 def test_results_json_schema(tmp_path):
@@ -417,10 +417,10 @@ def test_committed_v1_smoke_summary_still_loads_and_is_not_modified():
     assert not looks_like_refusal(refused[0]["refusal_text"])
 
 
-def test_load_summary_reads_v2_and_rejects_unknown_versions(tmp_path):
+def test_load_summary_reads_current_schema_and_rejects_unknown_versions(tmp_path):
     o = run(small(tmp_path), [gen(body=MAGIC)])
     s = ae.load_summary(o.run_dir / "summary.json")
-    assert s["loaded_from_schema_version"] == 2 and "schema_note" not in s
+    assert s["loaded_from_schema_version"] == 3 and "schema_note" not in s
     bad = tmp_path / "bad.json"
     bad.write_text(json.dumps({"schema_version": 99}))
     with pytest.raises(ValueError, match="unsupported"):
