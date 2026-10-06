@@ -1,6 +1,8 @@
 """Adaptive attacker experiment. NEEDS ANTHROPIC_API_KEY AND MAKES REAL, PAID MODEL CALLS. NOT RUN IN CI.
 
-STATUS: built, offline-tested only (stub models), not run live. No result from this script exists.
+STATUS: built and offline-tested (stub models). One 1-campaign x 3-round live smoke test has been run as a
+pipeline check (evals/results/live_adaptive/); it is not a result about attack success. The full experiment
+has not been run.
 
 A model (the attacker) writes the attack email, sees how the target reacted, and refines it over
 several rounds, against this project's own SIMULATED sandbox (synthetic inbox, in-memory fake tools,
@@ -29,7 +31,7 @@ from whetstone.adaptive_experiment import (CONDITIONS, DEFAULT_ATTACKER_MODEL_NA
                                            DEFAULT_ROUNDS, DEFAULT_TARGET_MODEL_NAME,
                                            DEFAULT_TARGET_REQUEST_LIMIT, RESULTS_DIR, ExperimentConfig,
                                            format_plan, plan, run_experiment)
-from whetstone.attacks.campaign import EXIT_KILL, KILL
+from whetstone.attacks.campaign import DEFAULT_ATTACKER_RETRIES, EXIT_KILL, KILL
 from whetstone.models import GOALS
 
 EXIT_REFUSED = 2
@@ -49,6 +51,9 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--target-model", default=DEFAULT_TARGET_MODEL_NAME)
     ap.add_argument("--max-target-runs", type=int, default=None, help="hard cap (default: the plan's maximum)")
     ap.add_argument("--max-attacker-calls", type=int, default=None, help="hard cap (default: the plan's maximum)")
+    ap.add_argument("--attacker-retries", type=int, default=DEFAULT_ATTACKER_RETRIES,
+                    help="corrective retries per round when the attacker returns no structured output "
+                         "(never after a refusal); each retry is a counted model call")
     ap.add_argument("--target-request-limit", type=int, default=DEFAULT_TARGET_REQUEST_LIMIT)
     ap.add_argument("--out-dir", default=str(RESULTS_DIR))
     return ap
@@ -80,7 +85,8 @@ def main(argv: list[str] | None = None, environ=None, *, attacker_factory=None, 
             seed=args.seed, conditions=tuple(c for c in args.conditions.split(",") if c),
             attacker_model=args.attacker_model, target_model=args.target_model,
             max_target_runs=args.max_target_runs, max_attacker_calls=args.max_attacker_calls,
-            out_dir=Path(args.out_dir), target_request_limit=args.target_request_limit)
+            out_dir=Path(args.out_dir), target_request_limit=args.target_request_limit,
+            attacker_retries=args.attacker_retries)
         p = plan(cfg)
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -114,7 +120,12 @@ def main(argv: list[str] | None = None, environ=None, *, attacker_factory=None, 
     for name, c in s["conditions"].items():
         r = c["campaign_success"]
         out(f"  {name:18s} campaign success {r['k']}/{r['n']}  exact95={r['exact95']}  "
-            f"refusals={c['attacker']['refused']}  aborted={c['campaigns_aborted']}")
+            f"refused={c['attacker']['refused']}  no_output={c['attacker']['no_structured_output']}  "
+            f"retries={c['attacker']['retries_used']}  aborted={c['campaigns_aborted']}")
+        for w in c["warnings"]:
+            out(f"    WARNING: {w}")
+        for w in c["warnings"]:
+            out(f"    WARNING: {w}")
     return outcome.exit_code
 
 

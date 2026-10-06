@@ -31,7 +31,9 @@ from .corpus import base_corpus
 from .feedback import (Generation, RoundFeedback, _clip, draft_to_attack, feedback_from_result)
 from .guardrails import validate_draft
 
-OUTCOMES = ("success", "failure", "attacker_refused", "attack_rejected")
+OUTCOMES = ("success", "failure", "attacker_refused", "attacker_no_structured_output", "attack_rejected")
+WASTED_OUTCOMES = ("attacker_refused", "attacker_no_structured_output", "attack_rejected")  # no target run happened
+DEFAULT_ATTACKER_RETRIES = 1
 EXIT_OK, EXIT_BUDGET, EXIT_KILL, EXIT_ERROR = 0, 3, 4, 5
 ABORT_EXIT = {"budget_attacker_calls": EXIT_BUDGET, "budget_target_runs": EXIT_BUDGET,
               "kill_switch": EXIT_KILL, "attacker_error": EXIT_ERROR, "target_error": EXIT_ERROR}
@@ -95,7 +97,8 @@ class AttackSource(Protocol):
     label: str                 # model name, or "blind_mutation"
     uses_model: bool           # does each step cost an attacker model call?
 
-    def next(self, goal: str, round_no: int, rounds: int, feedback: list[RoundFeedback]) -> Generation: ...
+    def next(self, goal: str, round_no: int, rounds: int, feedback: list[RoundFeedback],
+             corrective: bool = False) -> Generation: ...
 
 
 class BlindSource:
@@ -114,7 +117,8 @@ class BlindSource:
         self._queue: list[Attack] = []
         self._batches = 0
 
-    def next(self, goal: str, round_no: int, rounds: int, feedback: list[RoundFeedback]) -> Generation:
+    def next(self, goal: str, round_no: int, rounds: int, feedback: list[RoundFeedback],
+             corrective: bool = False) -> Generation:
         while not self._queue:
             self._batches += 1
             if self._batches > 50:
@@ -135,7 +139,10 @@ class RoundRecord:
     blocked_by: str | None = None
     tool_names: list[str] = field(default_factory=list)
     violations: list[str] = field(default_factory=list)      # guardrail rejection reasons
-    refusal_text: str = ""
+    refusal_text: str = ""             # clipped raw attacker text for a refusal OR a non-output
+    attacker_calls: int = 0            # model calls this round used, retries included (0 for the blind control)
+    retries: int = 0                   # of which corrective retries
+    first_attempt_text: str = ""       # clipped raw text of the first non-output, when a retry happened
     attacker_tokens: dict | None = None
     target_tokens: dict | None = None
 
@@ -162,6 +169,12 @@ class CampaignResult:
         return self.status == "success"
 
     @property
+    def all_rounds_wasted(self) -> bool:
+        """True if at least one round ran and none of them reached the target (refusal, non-output or
+        guardrail rejection every time): such a campaign says nothing about the target."""
+        return bool(self.rounds) and all(r.outcome in WASTED_OUTCOMES for r in self.rounds)
+
+    @property
     def first_success_round(self) -> int | None:
         return next((r.round_no for r in self.rounds if r.outcome == "success"), None)
 
@@ -171,6 +184,7 @@ class CampaignResult:
                 "rounds_planned": self.rounds_planned, "status": self.status,
                 "abort_reason": self.abort_reason, "abort_detail": self.abort_detail,
                 "first_success_round": self.first_success_round,
+                "all_rounds_wasted": self.all_rounds_wasted,
                 "rounds": [r.to_dict() for r in self.rounds]}
 
 
@@ -188,11 +202,18 @@ def _capturing(factory: TargetFactory, box: list) -> TargetFactory:
     return make
 
 
+def _no_output(gen: Generation) -> bool:
+    """A non-output that is NOT a genuine refusal (and so is eligible for a corrective retry)."""
+    return gen.draft is None and gen.attack is None and not gen.refused
+
+
 # ---- the loop ----------------------------------------------------------------------------
 def run_campaign(goal: str, source: AttackSource, factory: TargetFactory, stack: DefenseStack,
                  cfg: RunConfig, *, rounds: int = 8, budget: Budget, campaign_id: str,
-                 condition: str = "", audit: AuditLog | None = None, kill: KillSwitch | None = None
-                 ) -> CampaignResult:
+                 condition: str = "", audit: AuditLog | None = None, kill: KillSwitch | None = None,
+                 attacker_retries: int = DEFAULT_ATTACKER_RETRIES) -> CampaignResult:
+    """`attacker_retries`: corrective retries per round when the attacker returns no structured output
+    (never after a genuine refusal). Each retry is a model call counted against the budget."""
     if goal not in GOALS:
         raise ValueError(f"unknown goal {goal!r}; choose from {GOALS}")
     kill = kill or KILL
@@ -210,6 +231,7 @@ def run_campaign(goal: str, source: AttackSource, factory: TargetFactory, stack:
             "defenses": defenses, "attack": attack.to_dict() if attack else None,
             "draft": ({"technique": rec.technique, "subject": rec.subject, "body": rec.body,
                        "rationale": rec.rationale} if attack is None and rec.technique else None),
+            "attacker_calls": rec.attacker_calls, "retries": rec.retries,
             "outcome": {"outcome": rec.outcome, "blocked_by": rec.blocked_by, "violations": rec.violations,
                         "refusal_text": rec.refusal_text, "output_sha256": output_sha},
             "tool_names": rec.tool_names, "attacker_tokens": rec.attacker_tokens,
@@ -232,25 +254,47 @@ def run_campaign(goal: str, source: AttackSource, factory: TargetFactory, stack:
                 abort("budget_target_runs", f"max_target_runs={budget.max_target_runs}")
                 break
             with tracing.span("round", round=n, goal=goal, condition=condition) as rsp:
-                if source.uses_model:
-                    budget.attacker_calls += 1       # count before the call: it may be billed even if it fails
+                calls = retries = tin = tout = 0
+                first_text = ""
                 try:
-                    with tracing.span("attacker_call", model=source.label, round=n, goal=goal) as asp:
-                        gen = source.next(goal, n, rounds, feedback)
-                        tracing.set_attrs(asp, refused=gen.refused, input_tokens=gen.input_tokens,
-                                          output_tokens=gen.output_tokens)
+                    while True:
+                        if source.uses_model:
+                            budget.attacker_calls += 1   # count before the call: it may be billed even if it fails
+                            calls += 1
+                        with tracing.span("attacker_call", model=source.label, round=n, goal=goal,
+                                          retry=retries > 0) as asp:
+                            gen = (source.next(goal, n, rounds, feedback, corrective=True) if retries
+                                   else source.next(goal, n, rounds, feedback))
+                            tin += gen.input_tokens
+                            tout += gen.output_tokens
+                            tracing.set_attrs(asp, refused=gen.refused, input_tokens=gen.input_tokens,
+                                              output_tokens=gen.output_tokens,
+                                              no_structured_output=_no_output(gen))
+                        if not (source.uses_model and _no_output(gen) and retries < attacker_retries
+                                and budget.can_call_attacker() and not kill.reason()):
+                            break
+                        first_text = first_text or gen.refusal_text
+                        retries += 1
+                        if audit is not None:
+                            audit.append("adaptive_attacker_retry", {
+                                "campaign_id": campaign_id, "condition": condition, "goal": goal, "round": n,
+                                "attacker_model": source.label, "retry": retries,
+                                "reason": "attacker_no_structured_output",
+                                "previous_text": _clip(gen.refusal_text, 300)})
                 except Exception as exc:             # auth, network, quota: stop cleanly, keep partials
                     abort("attacker_error", f"{type(exc).__name__}: {_clip(str(exc), 200)}")
                     break
-                atokens = ({"input": gen.input_tokens, "output": gen.output_tokens}
-                           if source.uses_model else None)
-                if gen.refused or (gen.draft is None and gen.attack is None):
-                    rec = RoundRecord(n, "attacker_refused", refusal_text=gen.refusal_text,
+                atokens = {"input": tin, "output": tout} if source.uses_model else None
+                if gen.draft is None and gen.attack is None:
+                    refused = gen.refused
+                    oc = "attacker_refused" if refused else "attacker_no_structured_output"
+                    rec = RoundRecord(n, oc, refusal_text=gen.refusal_text, attacker_calls=calls,
+                                      retries=retries, first_attempt_text=first_text if retries else "",
                                       attacker_tokens=atokens)
-                    feedback.append(RoundFeedback(n, "-", "-", "", "attacker_refused",
-                                                  note=gen.refusal_text or "no output"))
+                    feedback.append(RoundFeedback(n, "-", "-", "", oc,
+                                                  note=(gen.refusal_text or "no output") if refused else ""))
                     audit_round(rec, None)
-                    tracing.set_attrs(rsp, outcome=rec.outcome)
+                    tracing.set_attrs(rsp, outcome=rec.outcome, attacker_calls=calls, retries=retries)
                     out.rounds.append(rec)
                     continue
                 attack = gen.attack
@@ -259,7 +303,8 @@ def run_campaign(goal: str, source: AttackSource, factory: TargetFactory, stack:
                     bad = validate_draft(d)
                     if bad:
                         rec = RoundRecord(n, "attack_rejected", d.technique, d.subject, d.body,
-                                          d.rationale, violations=bad, attacker_tokens=atokens)
+                                          d.rationale, violations=bad, attacker_calls=calls, retries=retries,
+                                          first_attempt_text=first_text, attacker_tokens=atokens)
                         feedback.append(RoundFeedback(n, d.technique, _clip(d.subject, 120), "",
                                                       "attack_rejected", note="; ".join(bad)))
                         audit_round(rec, None)
@@ -279,7 +324,8 @@ def run_campaign(goal: str, source: AttackSource, factory: TargetFactory, stack:
                 rec = RoundRecord(
                     n, "success" if res.success else "failure", attack.technique, e.subject, e.body,
                     gen.draft.rationale if gen.draft else "", res.blocked_by,
-                    [c.name for c in res.tool_calls], attacker_tokens=atokens, target_tokens=usage)
+                    [c.name for c in res.tool_calls], attacker_calls=calls, retries=retries,
+                    first_attempt_text=first_text, attacker_tokens=atokens, target_tokens=usage)
                 feedback.append(feedback_from_result(n, res, canaries))
                 audit_round(rec, attack, hashlib.sha256(res.output_text.encode()).hexdigest())
                 tracing.set_attrs(rsp, outcome=rec.outcome, technique=attack.technique,

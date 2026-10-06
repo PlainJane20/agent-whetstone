@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Callable
 
 from . import stats
-from .attacks.campaign import (ABORT_EXIT, EXIT_OK, KILL, AttackSource, BlindSource, Budget, CampaignResult,
+from .attacks.campaign import (ABORT_EXIT, DEFAULT_ATTACKER_RETRIES, EXIT_OK, KILL, AttackSource, BlindSource, Budget, CampaignResult,
                                KillSwitch, run_campaign)
 from .audit import AuditLog
 from .defenses import build_stack
@@ -39,7 +39,8 @@ DEFAULT_CAMPAIGNS = 3
 DEFAULT_TARGET_REQUEST_LIMIT = 30      # model requests per target run: a spend guard per run
 ATTACKER_MAX_REQUESTS = 3              # model requests per attacker call (LLMAttacker default)
 RESULTS_DIR = Path(__file__).resolve().parents[2] / "evals" / "results" / "live_adaptive"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2          # 2: refusals split from non-outputs, retries recorded. Readers accept 1 (see load_summary).
+SUPPORTED_SCHEMAS = (1, 2)
 
 STATUS_NOTE = ("Built and offline-tested only. A summary file written by a real run replaces this note "
                "with the run's own metadata; none has been committed yet.")
@@ -86,6 +87,7 @@ class ExperimentConfig:
     out_dir: Path = RESULTS_DIR
     task: str = DEFAULT_TASK
     target_request_limit: int = DEFAULT_TARGET_REQUEST_LIMIT
+    attacker_retries: int = DEFAULT_ATTACKER_RETRIES   # corrective retries per round on a non-output (not on a refusal)
 
     def validate(self) -> None:
         bad = [g for g in self.goals if g not in GOALS]
@@ -96,6 +98,8 @@ class ExperimentConfig:
             raise ValueError(f"unknown condition(s) {bad}; choose from {tuple(CONDITIONS)}")
         if self.campaigns < 1 or self.rounds < 1:
             raise ValueError("campaigns and rounds must be at least 1")
+        if self.attacker_retries < 0:
+            raise ValueError("attacker_retries cannot be negative")
         if not self.goals or not self.conditions:
             raise ValueError("need at least one goal and one condition")
         for v in (self.max_target_runs, self.max_attacker_calls):
@@ -105,7 +109,8 @@ class ExperimentConfig:
 
 # ---- plan --------------------------------------------------------------------------------
 def plan(cfg: ExperimentConfig) -> dict:
-    """Pure arithmetic: how many campaigns, rounds, target runs and attacker calls at most."""
+    """Pure arithmetic: how many campaigns, rounds, target runs and attacker calls at most. The attacker-call
+    upper bound is rounds x (1 + retries): a retry is a model call and counts against the budget."""
     cfg.validate()
     per = {}
     for name in cfg.conditions:
@@ -113,7 +118,7 @@ def plan(cfg: ExperimentConfig) -> dict:
         n = len(cfg.goals) * cfg.campaigns
         per[name] = {"kind": c.kind, "defenses": list(c.defenses), "campaigns": n,
                      "max_target_runs": n * cfg.rounds,
-                     "max_attacker_calls": n * cfg.rounds if c.kind == "adaptive" else 0}
+                     "max_attacker_calls": n * cfg.rounds * (1 + cfg.attacker_retries) if c.kind == "adaptive" else 0}
     tot_t = sum(p["max_target_runs"] for p in per.values())
     tot_a = sum(p["max_attacker_calls"] for p in per.values())
     budget_t = tot_t if cfg.max_target_runs is None else cfg.max_target_runs
@@ -125,6 +130,7 @@ def plan(cfg: ExperimentConfig) -> dict:
             "may_abort_on_budget": budget_t < tot_t or budget_a < tot_a,
             "target_request_limit_per_run": cfg.target_request_limit,
             "attacker_requests_per_call": ATTACKER_MAX_REQUESTS,
+            "attacker_retries_per_round": cfg.attacker_retries,
             "attacker_model": cfg.attacker_model, "target_model": cfg.target_model, "seed": cfg.seed}
 
 
@@ -140,6 +146,9 @@ def format_plan(p: dict) -> str:
                  f"target runs <= {c['max_target_runs']:4d}  attacker calls <= {c['max_attacker_calls']:4d}")
     L += [f"  TOTAL upper bound: {p['total_campaigns']} campaigns, {p['max_target_runs']} target runs, "
           f"{p['max_attacker_calls']} attacker calls",
+          f"  attacker calls include up to {p['attacker_retries_per_round']} corrective retry per round when the "
+          f"attacker returns no structured output (not after a genuine refusal): upper bound = rounds x "
+          f"(1 + {p['attacker_retries_per_round']}); typical use is far lower.",
           f"  hard budget this invocation: max_target_runs={p['budget']['max_target_runs']}, "
           f"max_attacker_calls={p['budget']['max_attacker_calls']}"
           + ("   (BELOW the plan: the run may abort part-way and save partial results)"
@@ -200,7 +209,15 @@ def summarize_condition(cond: Condition, results: list[CampaignResult], planned:
     wins = [r for r in done if r.success]
     rounds = [x for r in results for x in r.rounds]
     outcomes = Counter(x.outcome for x in rounds)
-    model_calls = len(rounds) if cond.kind == "adaptive" else 0
+    adaptive = cond.kind == "adaptive"
+    model_calls = sum(x.attacker_calls for x in rounds) if adaptive else 0
+    n_rounds = len(rounds) if adaptive else 0
+    retries = sum(x.retries for x in rounds) if adaptive else 0
+    recovered = sum(1 for x in rounds if x.retries and x.outcome not in ("attacker_no_structured_output", "attacker_refused"))
+    wasted = [r.campaign_id for r in results if r.all_rounds_wasted]
+
+    def rate(k: int):
+        return round(k / n_rounds, 4) if n_rounds else None
     atts = [r.first_success_round for r in wins]
     per_goal = {}
     for g in sorted({r.goal for r in results}):
@@ -216,10 +233,20 @@ def summarize_condition(cond: Condition, results: list[CampaignResult], planned:
         "per_goal": per_goal,
         "rounds_by_outcome": dict(sorted(outcomes.items())),
         "blocked_by": dict(sorted(Counter(x.blocked_by for x in rounds if x.blocked_by).items())),
-        "attacker": {"model_calls": model_calls, "refused": outcomes.get("attacker_refused", 0),
-                     "refusal_rate": round(outcomes.get("attacker_refused", 0) / model_calls, 4) if model_calls else None,
+        "attacker": {"model_calls": model_calls, "rounds": n_rounds,
+                     "refused": outcomes.get("attacker_refused", 0),
+                     "refusal_rate": rate(outcomes.get("attacker_refused", 0)),
+                     "no_structured_output": outcomes.get("attacker_no_structured_output", 0),
+                     "no_structured_output_rate": rate(outcomes.get("attacker_no_structured_output", 0)),
+                     "retries_used": retries, "retries_recovered": recovered,
                      "rejected_by_guardrails": outcomes.get("attack_rejected", 0),
+                     "rates_are_per": "adaptive round (model_calls also counts retries); refusal vs "
+                                      "no-structured-output is a keyword heuristic",
                      "tokens": _tok(rounds, "attacker")},
+        "campaigns_all_rounds_wasted": len(wasted),
+        "warnings": ([f"{len(wasted)} campaign(s) had every round wasted (refusal / no structured output / "
+                      f"guardrail rejection; the target was never run): {wasted}. Their 0 successes say "
+                      "nothing about the target."] if wasted else []),
         "target": {"runs": sum(1 for x in rounds if x.outcome in ("success", "failure")),
                    "tokens": _tok(rounds, "target")},
         "techniques_tried": dict(sorted(Counter(x.technique for x in rounds if x.technique).items())),
@@ -252,7 +279,7 @@ def _build_summary(cfg: ExperimentConfig, p: dict, budget: Budget, results: dict
         "status": status, "abort": abort, "run_id": run_id,
         "environment": "SIMULATED sandbox (synthetic inbox, in-memory fake tools, fake CANARY secrets); "
                        "model attacker and model target",
-        "meta": {"started_utc": started, "finished_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "meta": {"attacker_retries": cfg.attacker_retries, "started_utc": started, "finished_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                  "date": started[:10], "seed": cfg.seed, "attacker_model": cfg.attacker_model,
                  "target_model": cfg.target_model, "task": cfg.task, "rounds": cfg.rounds,
                  "campaigns_per_goal": cfg.campaigns, "goals": list(cfg.goals),
@@ -307,7 +334,7 @@ def run_experiment(cfg: ExperimentConfig, attacker_factory: Callable[[str], Atta
                     cid = f"{name}:{goal}:c{c}:s{seed}"
                     res = run_campaign(goal, source, factory, build_stack(list(cond.defenses)), rc,
                                        rounds=cfg.rounds, budget=budget, campaign_id=cid, condition=name,
-                                       audit=audits[name], kill=kill)
+                                       audit=audits[name], kill=kill, attacker_retries=cfg.attacker_retries)
                     results[name].append(res)
                     say(f"[{cid}] {res.status}" + (f" at round {res.first_success_round}" if res.success else "")
                         + (f" ({res.abort_reason})" if res.abort_reason else ""))
@@ -321,3 +348,30 @@ def run_experiment(cfg: ExperimentConfig, attacker_factory: Callable[[str], Atta
     summary = write(status)
     code = EXIT_OK if abort is None else ABORT_EXIT.get(abort["reason"], 5)
     return ExperimentOutcome(summary, code, run_dir, results)
+
+
+# ---- reading ---------------------------------------------------------------------------------
+V1_NOTE = ("schema_version 1 summary (written before refusals and non-outputs were told apart): its "
+           "'attacker_refused' rounds and 'refused' / 'refusal_rate' may include plain-text format failures, so "
+           "they can overstate refusals. Fields added in v2 are filled with None where not recorded.")
+_V2_ATTACKER_DEFAULTS = {"no_structured_output": None, "no_structured_output_rate": None, "retries_used": None,
+                         "retries_recovered": None, "rounds": None}
+
+
+def load_summary(path) -> dict:
+    """Read a summary.json of schema version 1 or 2. Version 1 is returned unchanged except that the
+    version-2 fields are added as None and `loaded_from_schema_version` / `schema_note` say so; the file
+    on disk is never modified. Unknown versions raise ValueError."""
+    s = json.loads(Path(path).read_text())
+    v = s.get("schema_version")
+    if v not in SUPPORTED_SCHEMAS:
+        raise ValueError(f"unsupported summary schema_version {v!r}; supported: {SUPPORTED_SCHEMAS}")
+    s["loaded_from_schema_version"] = v
+    if v == 1:
+        s["schema_note"] = V1_NOTE
+        for c in s.get("conditions", {}).values():
+            for k, d in _V2_ATTACKER_DEFAULTS.items():
+                c.get("attacker", {}).setdefault(k, d)
+            c.setdefault("campaigns_all_rounds_wasted", None)
+            c.setdefault("warnings", [])
+    return s

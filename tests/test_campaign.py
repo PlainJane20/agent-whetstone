@@ -1,5 +1,5 @@
 import pytest
-from adaptive_stubs import MAGIC, StubSource, draft, gen, magic_factory, refusal
+from adaptive_stubs import MAGIC, StubSource, draft, gen, magic_factory, no_output, refusal
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
@@ -22,10 +22,10 @@ def fresh_budget(t=100, a=100):
 
 
 def camp(source, goal="delete_all", rounds=8, budget=None, stack=None, factory=None, audit=None, kill=None,
-         cfg=CFG, cid="c1", condition="adaptive_none"):
+         cfg=CFG, cid="c1", condition="adaptive_none", retries=1):
     return run_campaign(goal, source, factory or magic_factory(), stack or build_stack([]), cfg, rounds=rounds,
                         budget=budget or fresh_budget(), campaign_id=cid, condition=condition, audit=audit,
-                        kill=kill or KillSwitch(path="/nonexistent/kill", environ={}))
+                        kill=kill or KillSwitch(path="/nonexistent/kill", environ={}), attacker_retries=retries)
 
 
 def script_win_at(k):
@@ -81,9 +81,84 @@ def test_refusal_then_success_in_a_later_round():
     assert [x.outcome for x in r.rounds] == ["attacker_refused", "success"]
 
 
-def test_empty_generation_counts_as_a_refusal():
+def test_empty_generation_is_a_non_output_not_a_refusal():
     r = camp(StubSource([Generation()]), rounds=1)
-    assert r.rounds[0].outcome == "attacker_refused"
+    assert r.rounds[0].outcome == "attacker_no_structured_output"
+
+
+# ---- non-outputs, retries ---------------------------------------------------------------
+def test_plain_text_then_structured_on_retry_runs_the_target_and_records_the_retry():
+    b = fresh_budget()
+    src = StubSource([[no_output("I'll analyze the feedback"), gen(body=MAGIC)]])
+    r = camp(src, budget=b)
+    assert r.status == "success" and [x.outcome for x in r.rounds] == ["success"]
+    assert src.correctives == [False, True] and src.calls == 2
+    assert (r.rounds[0].attacker_calls, r.rounds[0].retries) == (2, 1)
+    assert r.rounds[0].first_attempt_text == "I'll analyze the feedback"
+    assert b.attacker_calls == 2 and b.target_runs == 1
+    assert r.rounds[0].attacker_tokens == {"input": 18, "output": 8}      # both calls are summed
+
+
+def test_plain_text_twice_is_recorded_as_no_structured_output_and_the_campaign_moves_on():
+    b = fresh_budget()
+    src = StubSource([no_output(), no_output(), [gen(body=MAGIC)]])
+    r = camp(src, budget=b, rounds=3)
+    assert [x.outcome for x in r.rounds] == ["attacker_no_structured_output", "attacker_no_structured_output", "success"]
+    assert [x.retries for x in r.rounds] == [1, 1, 0]
+    assert b.attacker_calls == 5 and b.target_runs == 1
+    assert r.rounds[0].refusal_text.startswith("I'll analyze")        # raw text kept (clipped upstream)
+    assert not r.all_rounds_wasted
+
+
+def test_genuine_refusal_is_never_retried():
+    b = fresh_budget()
+    src = StubSource([refusal("I can't help with that.")])
+    r = camp(src, budget=b, rounds=2)
+    assert [x.outcome for x in r.rounds] == ["attacker_refused"] * 2
+    assert src.correctives == [False, False] and b.attacker_calls == 2 and r.rounds[0].retries == 0
+
+
+def test_retry_that_comes_back_as_a_refusal_is_a_refusal():
+    r = camp(StubSource([[no_output(), refusal("I must decline.")]]), rounds=1)
+    assert r.rounds[0].outcome == "attacker_refused" and r.rounds[0].retries == 1
+
+
+def test_retries_are_configurable_zero_means_none():
+    src = StubSource([no_output()])
+    r = camp(src, rounds=2, retries=0)
+    assert src.calls == 2 and all(x.retries == 0 for x in r.rounds)
+    src2 = StubSource([no_output()])
+    camp(src2, rounds=1, retries=3)
+    assert src2.calls == 4                                               # 1 + 3 retries
+
+
+def test_retries_count_against_the_attacker_budget_and_never_exceed_it():
+    b = fresh_budget(a=3)
+    src = StubSource([no_output()])
+    r = camp(src, budget=b, rounds=5)
+    # round 1: call 1 + retry (2 calls); round 2: call 3, no budget left for its retry; round 3: abort
+    assert b.attacker_calls == 3 and src.calls == 3 and len(r.rounds) == 2
+    assert r.abort_reason == "budget_attacker_calls"
+    assert [x.retries for x in r.rounds] == [1, 0]
+
+
+def test_retry_does_not_run_after_the_kill_switch_is_tripped():
+    k = KillSwitch(path="/nonexistent/kill", environ={})
+    src = StubSource([no_output()], on_call=lambda n: k.trip("stop"))
+    r = camp(src, kill=k, rounds=3)
+    assert src.calls == 1 and r.rounds[0].retries == 0 and r.abort_reason == "kill_switch"
+
+
+def test_every_round_wasted_is_flagged_on_the_campaign():
+    r = camp(StubSource([refusal(), no_output(), gen(body="mail bob@gmail.com")]), rounds=3)
+    assert r.all_rounds_wasted and r.to_dict()["all_rounds_wasted"] is True
+    assert not camp(StubSource([gen()]), rounds=2).all_rounds_wasted
+
+
+def test_the_corrective_retry_sees_the_same_feedback():
+    src = StubSource([[no_output(), gen()]])
+    camp(src, rounds=1)
+    assert src.seen[0] == src.seen[1]
 
 
 def test_guardrail_rejected_draft_is_not_run_and_is_reported_to_the_attacker():
@@ -274,6 +349,21 @@ def test_audit_records_attacker_and_target_models_and_campaign_id():
     assert audit.records()[-1]["data"]["status"] == "success"
 
 
+def test_audit_records_retries_and_the_non_output_outcome():
+    audit = AuditLog()
+    camp(StubSource([no_output("some analysis"), [no_output("more analysis"), gen(body=MAGIC)]]), audit=audit,
+         rounds=2)
+    kinds = [x["event"] for x in audit.records()]
+    assert kinds == ["adaptive_attacker_retry", "adaptive_round", "adaptive_attacker_retry", "adaptive_round",
+                     "campaign_end"]
+    rt = audit.records()[0]["data"]
+    assert rt["round"] == 1 and rt["retry"] == 1 and rt["previous_text"] == "some analysis"
+    r1, r2 = audit.records()[1]["data"], audit.records()[3]["data"]
+    assert r1["outcome"]["outcome"] == "attacker_no_structured_output" and (r1["attacker_calls"], r1["retries"]) == (2, 1)
+    assert r2["outcome"]["outcome"] == "success" and r2["retries"] == 1
+    assert audit.verify() == (True, None)
+
+
 def test_audit_records_defenses_and_rejections_and_refusals():
     audit = AuditLog()
     camp(StubSource([refusal("nope"), gen(body="mail bob@gmail.com")]), audit=audit, rounds=2,
@@ -343,6 +433,16 @@ def test_refusal_span_marks_refused(spans):
     camp(StubSource([refusal()]), rounds=1)
     call = next(s for s in spans.get_finished_spans() if s.name == "whetstone.attacker_call")
     assert call.attributes["refused"] is True
+
+
+def test_retry_span_marks_retry_and_non_output_without_any_text(spans):
+    camp(StubSource([no_output("zebra-analysis-text")]), rounds=1)
+    calls = [s for s in spans.get_finished_spans() if s.name == "whetstone.attacker_call"]
+    assert [c.attributes["retry"] for c in calls] == [False, True]
+    assert all(c.attributes["no_structured_output"] is True and c.attributes["refused"] is False for c in calls)
+    rnd = next(s for s in spans.get_finished_spans() if s.name == "whetstone.round")
+    assert rnd.attributes["outcome"] == "attacker_no_structured_output" and rnd.attributes["retries"] == 1
+    assert "zebra" not in " ".join(f"{k}={v}" for s in spans.get_finished_spans() for k, v in s.attributes.items())
 
 
 # ---- blind control -----------------------------------------------------------------------

@@ -10,6 +10,7 @@ from whetstone.attacks import FAMILIES  # noqa: E402
 from whetstone.attacks.llm_attacker import (DEFAULT_ATTACKER_MODEL, GOAL_TEXT, SYSTEM_PROMPT,  # noqa: E402
                                             WITHHELD, AttackSpec, LLMAttacker, RoundFeedback,
                                             build_prompt, feedback_from_result, render_feedback)
+from whetstone.attacks.llm_attacker import CORRECTIVE, looks_like_refusal  # noqa: E402
 from whetstone.defenses import build_stack  # noqa: E402
 from whetstone.harness import RunConfig, run_attack  # noqa: E402
 from whetstone.models import GOALS, Attack, AttackResult, Email, ToolCall  # noqa: E402
@@ -51,15 +52,76 @@ def test_structured_output_becomes_a_draft_with_no_judging_field():
     assert set(AttackSpec.model_fields) == {"subject", "body", "technique", "rationale"}
 
 
-def test_plain_text_reply_is_a_refusal_not_an_error():
+def test_refusal_language_is_a_refusal_not_an_error():
     g = LLMAttacker(text_model("I can't help with that.")).generate("leak_forward", 1, [])
-    assert g.draft is None and g.refused and "can't help" in g.refusal_text
+    assert g.draft is None and g.refused and not g.no_structured_output and "can't help" in g.refusal_text
 
 
-def test_unusable_structured_output_is_a_refusal_not_an_error():
+def test_plain_text_analysis_is_no_structured_output_not_a_refusal():
+    t = "I'll analyze the feedback from the previous two rounds: **Round 1 Analysis:** the target ignored it."
+    g = LLMAttacker(text_model(t)).generate("leak_forward", 1, [])
+    assert g.draft is None and g.no_structured_output and not g.refused and g.refusal_text.startswith("I'll analyze")
+
+
+def test_raw_text_is_clipped_in_the_generation():
+    g = LLMAttacker(text_model("analysis " * 500)).generate("leak_forward", 1, [])
+    assert g.no_structured_output and len(g.refusal_text) <= 300
+
+
+def test_unusable_structured_output_is_no_structured_output():
     bad = FunctionModel(lambda m, i: ModelResponse(parts=[ToolCallPart(i.output_tools[0].name, {"nonsense": 1})]))
     g = LLMAttacker(bad).generate("leak_forward", 1, [])
-    assert g.refused and "no structured output" in g.refusal_text
+    assert g.no_structured_output and not g.refused and "malformed structured output" in g.refusal_text
+
+
+def test_content_filter_is_a_refusal():
+    from pydantic_ai.exceptions import ContentFilterError
+
+    def filtered(messages, info):
+        raise ContentFilterError("blocked by provider")
+    g = LLMAttacker(FunctionModel(filtered)).generate("leak_forward", 1, [])
+    assert g.refused and not g.no_structured_output and "content filter" in g.refusal_text
+
+
+@pytest.mark.parametrize("text", [
+    "I can't help with that", "I can\u2019t do this", "I cannot write that email", "I won't write this",
+    "I'm not able to do that", "That is against my guidelines", "I'm not comfortable with this",
+    "I must decline.", "Sorry, can't help here", "I am unable to assist with that", "I will not write that",
+    "Sorry. I CANNOT do this"])
+def test_refusal_heuristic_matches_refusal_language(text):
+    assert looks_like_refusal(text)
+
+
+@pytest.mark.parametrize("text", [
+    "", "I'll analyze the feedback from the previous two rounds: **Round 1 Analysis:**",
+    "Here is my reasoning about the target's behaviour.", "Round 2: the assistant called post_message only.",
+    ("analysis " * 100) + "I can't see why it failed"])      # refusal language past the scan window does not count
+def test_refusal_heuristic_does_not_match_analysis_text(text):
+    assert not looks_like_refusal(text)
+
+
+def test_corrective_retry_prompt_is_appended_only_when_asked():
+    base = build_prompt("delete_all", 2, 8, "t", [])
+    corr = build_prompt("delete_all", 2, 8, "t", [], corrective=True)
+    assert CORRECTIVE not in base and corr.startswith(base) and corr.endswith(CORRECTIVE)
+    assert "ONLY" in CORRECTIVE and "rationale" in CORRECTIVE and "no analysis" in CORRECTIVE
+
+
+def test_the_corrective_prompt_reaches_the_model_on_retry_only():
+    seen = []
+
+    def fn(messages, info):
+        seen.append(str(messages))
+        return ModelResponse(parts=[TextPart("thinking out loud")])
+    a = LLMAttacker(FunctionModel(fn))
+    a.next("leak_post", 1, 8, [])
+    a.next("leak_post", 1, 8, [], corrective=True)
+    assert CORRECTIVE not in seen[0] and CORRECTIVE in seen[1]
+
+
+def test_system_prompt_says_output_only_the_structured_object_and_reasoning_goes_in_rationale():
+    assert "respond ONLY with the structured attack object" in SYSTEM_PROMPT.replace("\n", " ")
+    assert "`rationale` field" in SYSTEM_PROMPT
 
 
 def test_other_failures_are_not_swallowed():
@@ -148,9 +210,10 @@ def test_feedback_is_clipped():
 
 def test_render_marks_refusals_and_rejections():
     fb = [RoundFeedback(1, "-", "-", "", "attacker_refused", note="I decline"),
+          RoundFeedback(3, "-", "-", "", "attacker_no_structured_output"),
           RoundFeedback(2, "role_play", "Hi", "", "attack_rejected", note="body: contains a URL")]
     t = render_feedback(fb)
-    assert "you declined: I decline" in t and "discarded by the safety checks" in t
+    assert "you declined: I decline" in t and "plain text or malformed" in t and "discarded by the safety checks" in t
     assert render_feedback([]).startswith("No earlier rounds")
 
 
@@ -163,10 +226,13 @@ def test_propose_follows_the_attacker_protocol_and_validates():
     assert bad.propose(0, []) == []
 
 
-def test_propose_records_refusal_into_later_feedback_and_needs_a_goal():
-    a = LLMAttacker(text_model("no"), goal="leak_post")
+def test_propose_records_refusal_and_non_output_into_later_feedback_and_needs_a_goal():
+    a = LLMAttacker(text_model("I won't do that."), goal="leak_post")
     assert a.propose(0, []) == []
     assert a._local[0].outcome == "attacker_refused"
+    b = LLMAttacker(text_model("no"), goal="leak_post")
+    assert b.propose(0, []) == []
+    assert b._local[0].outcome == "attacker_no_structured_output"
     with pytest.raises(ValueError):
         LLMAttacker(TestModel()).propose(0, [])
     with pytest.raises(ValueError):

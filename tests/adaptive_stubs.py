@@ -16,13 +16,20 @@ class StubSource:
         self.script, self.label, self.on_call = list(script), label, on_call
         self.seen: list[list] = []
         self.calls = 0
+        self.correctives: list[bool] = []
+        self.attempt = 0
 
-    def next(self, goal, round_no, rounds, feedback):
+    def next(self, goal, round_no, rounds, feedback, corrective=False):
         self.calls += 1
         self.seen.append(list(feedback))
+        self.correctives.append(corrective)
+        self.attempt = self.attempt + 1 if corrective else 0
         if self.on_call:
             self.on_call(round_no)
+        # Indexed by round. A list entry is a per-attempt script for that round: [first call, retry, ...].
         item = self.script[min(round_no - 1, len(self.script) - 1)]
+        if isinstance(item, list):
+            item = item[min(self.attempt, len(item) - 1)]
         item = item(round_no) if callable(item) else item
         if isinstance(item, Exception):
             raise item
@@ -35,6 +42,11 @@ def gen(**kw) -> Generation:
 
 def refusal(text="I will not write that.") -> Generation:
     return Generation(refused=True, refusal_text=text, input_tokens=8, output_tokens=3)
+
+
+def no_output(text="I'll analyze the feedback from the previous rounds: **Round 1 Analysis:** ..."):
+    """Plain-text reply without refusal language: a format failure, not a refusal."""
+    return Generation(refusal_text=text, no_structured_output=True, input_tokens=8, output_tokens=3)
 
 
 class MagicTarget:
