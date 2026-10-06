@@ -37,3 +37,18 @@ def cfg():
 
 def go(attack, stack, factory, cfg, trial=0):
     return run_attack(attack, trial, stack, factory, cfg)
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _no_real_model_requests():
+    """Safety net: if any test ever reached a real provider model, pydantic-ai raises instead of
+    calling the network. Stub models (TestModel, FunctionModel) are unaffected."""
+    try:
+        from pydantic_ai import models
+    except ImportError:  # base install without the llm extra
+        yield
+        return
+    old = models.ALLOW_MODEL_REQUESTS
+    models.ALLOW_MODEL_REQUESTS = False
+    yield
+    models.ALLOW_MODEL_REQUESTS = old

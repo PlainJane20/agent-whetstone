@@ -3,7 +3,7 @@ from dataclasses import replace
 
 import pytest
 
-from whetstone.attacks import (ALL_MUTATIONS, FAMILIES, BlindMutator, LLMAttacker, MutatingAttacker,
+from whetstone.attacks import (ALL_MUTATIONS, FAMILIES, BlindMutator, MutatingAttacker,
                                ScriptedAttacker, base_corpus, build_attack, mutate, variants)
 from whetstone.models import EXTERNAL_ADDRESS, GOALS, Attack, AttackResult
 
@@ -151,8 +151,3 @@ def test_blind_mutator_ignores_feedback():
     base = base_corpus(("role_play",))
     out = BlindMutator(base=base, seed=0, budget=50).propose(1, [])
     assert {v.lineage for v in out} == {a.id for a in base}
-
-
-def test_llm_attacker_is_a_stub():
-    with pytest.raises(NotImplementedError, match="not built"):
-        LLMAttacker().propose(0, [])

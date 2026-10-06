@@ -1,4 +1,4 @@
-"""Attackers. All offline. `LLMAttacker` is a stub: NOT built, NOT run."""
+"""Attackers that need no model (scripted, mutating, blind). The model-driven one is in llm_attacker.py."""
 from __future__ import annotations
 
 import random
@@ -104,14 +104,3 @@ class BlindMutator(MutatingAttacker):
 
     def _parents(self, history: list[AttackResult]) -> list[AttackResult]:
         return [AttackResult(a, 0, False, None, False, [], 0.0, 0) for a in self.base]
-
-
-class LLMAttacker:
-    """NOT BUILT, NOT RUN. A placeholder for a model-driven attacker behind the same protocol.
-
-    A live attacker would need an API key and would only ever be pointed at this project's
-    own sandbox. Nothing in this repository calls a model for attack generation.
-    """
-
-    def propose(self, round_no: int, history: list[AttackResult]) -> list[Attack]:
-        raise NotImplementedError("LLMAttacker is not built and has never been run")
