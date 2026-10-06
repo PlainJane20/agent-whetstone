@@ -34,8 +34,8 @@
   <g filter="url(#sh)"><rect x="616" y="100" width="250" height="140" rx="14" fill="#ffffff" stroke="#14b8a6" stroke-width="2"/></g>
   <text x="741" y="132" text-anchor="middle" font-size="12" font-weight="700" fill="#0f766e" letter-spacing="1.5">3  THE TARGET</text>
   <text x="741" y="162" text-anchor="middle" font-size="21" font-weight="700" fill="#0f172a">Simulated or live agent</text>
-  <text x="741" y="188" text-anchor="middle" font-size="13" fill="#334155">follows instructions by an</text>
-  <text x="741" y="207" text-anchor="middle" font-size="13" fill="#334155">author-set susceptibility profile</text>
+  <text x="741" y="188" text-anchor="middle" font-size="13" fill="#334155">simulated: follows an author-set</text>
+  <text x="741" y="207" text-anchor="middle" font-size="13" fill="#334155">susceptibility profile; live: a real LLM</text>
   <text x="741" y="228" text-anchor="middle" font-size="12" font-style="italic" fill="#64748b">default: a simulation; or a real LLM</text>
   <path d="M870 170H902" stroke="#be123c" stroke-width="2.5" fill="none" marker-end="url(#arr)"/>
 
