@@ -10,6 +10,7 @@ Each entry names the code or test that demonstrates it. Nothing here is claimed 
 - 11 technique families x 5 goals with three paraphrases per goal; `attacks/corpus.py`, `tests/test_attacks.py`.
 - 14 seeded, deterministic mutators; `test_mutation_is_deterministic_for_a_seed`.
 - Adaptive attacker with progress feedback, plus a blind control; `attacks/attackers.py`, `evals/mutation.py`.
+- LLM-driven adaptive attacker with per-round feedback, a campaign loop, a blind-mutation control with the same attempt budget and a fixed metric set (campaign success, attempts to first success, refusal rate, adaptive versus blind); `attacks/llm_attacker.py`, `attacks/campaign.py`, `adaptive_experiment.py`, `tests/test_campaign.py`. **Built and tested offline with stubs only; never run live.**
 - Parser sanity: with every probability at 1, all 55 attacks succeed; `test_fully_gullible_target_is_fooled_by_every_goal_of_each_family`.
 
 ## Measurement discipline
@@ -21,6 +22,7 @@ Each entry names the code or test that demonstrates it. Nothing here is claimed 
 - False positives reported next to every defense, on routine and hard benign mail separately; `evals/defenses.py`.
 - Train/test split by technique family, three folds, three experiments (standard, indicator-masked, unseen wording), unflattering result reported; `evals/generalisation.py`.
 - Wilson intervals; authorship bias and latency caveats stored in the JSON; `evals/common.py`.
+- Exact (Clopper-Pearson) and Fisher intervals and tests with no scipy; `stats.py`, `tests/test_stats.py`.
 - Baseline gate: ASR must stay in a non-vacuous range; `evals/baseline.py`, `test_baseline_is_not_vacuous`.
 
 ## Deterministic oracles
@@ -52,6 +54,17 @@ Each entry names the code or test that demonstrates it. Nothing here is claimed 
 - Indicator masking so rules are about instructions; `test_masked_rules_cover_an_address_the_training_set_never_saw`.
 - Arms race against the mutating attacker; `evals/mutation.py`.
 
+## Safe use of a dual-use capability
+
+**Behavior:** Bound what a model-written attack can contain and what a run can spend, and say what the bounds do not cover.
+
+**Evidence:**
+- Deterministic validator (reserved domains, key-like strings, canary marker, phone and IP, real organisations, length, technique set), checked against the 55 author-written attacks so it is not over-strict; `attacks/guardrails.py`, `tests/test_guardrails.py`.
+- Refusal is a recorded outcome, not an error or something to route around; `test_refusals_are_recorded_not_errors_and_skip_the_target`.
+- Hard call budgets, kill switch, clean abort with partial results; the live script refuses without `--live`, `--yes` and an environment key, never takes a key on the command line, and CI never calls it; `tests/test_campaign.py`, `tests/test_adaptive_experiment.py`.
+- Real provider requests switched off for the whole test suite; `tests/conftest.py`.
+- Dual-use note with the validators' limits: [THREAT_MODEL.md](THREAT_MODEL.md). All offline; none of it observed with a real model.
+
 ## Secure agent design
 
 **Behavior:** Put enforcement between the agent and its tools, not in the prompt.
@@ -75,13 +88,13 @@ Each entry names the code or test that demonstrates it. Nothing here is claimed 
 
 **Evidence:**
 - Environment labelled SIMULATED in every eval output; target described as a simulation in the README, the module docstring and the JSON caveat.
-- `LLMTarget` unit-tested with TestModel and run live once against Claude Haiku 4.5 (0/165 undefended, 0/165 defended, 3/72 benign false positives; `evals/results/live/`); a null result reported as a null result, with an exact upper bound and the limits of that bound; `LLMAttacker` and `LLMDefender` still raise `NotImplementedError`; `--target llm` needs `--live` and an environment key; `tests/test_llm_target.py`, `tests/test_cli.py`.
+- `LLMTarget` unit-tested with TestModel and run live once against Claude Haiku 4.5 (0/165 undefended, 0/165 defended, 3/72 benign false positives; `evals/results/live/`); a null result reported as a null result, with an exact upper bound and the limits of that bound; `LLMDefender` still raises `NotImplementedError`, and `LLMAttacker` is built and offline-tested only, not run live; `--target llm` needs `--live` and an environment key; `tests/test_llm_target.py`, `tests/test_cli.py`.
 - Live-run hygiene: audit records carry the real target label (a hardcoded `gullible` label was found and fixed, `test_harness_target_label.py`), replay refuses non-simulated records, and positive controls show the live pipeline can register a success (`evals/live_positive_control.py`, not run in CI; the 2026-10-05 control was an equivalent ad-hoc run).
 - [THREAT_MODEL.md](THREAT_MODEL.md) lists what the defenses do not stop.
 
 ## Not demonstrated
 
-- A real LLM as an attacker or defender (not built). A real LLM as a target is demonstrated for one model, one task and 3 trials only.
+- A real LLM as an attacker (built, offline-tested with stubs only, never run) or defender (not built). A real LLM as a target is demonstrated for one model, one task and 3 trials only.
 - Any real mailbox, chat service or agent product (inbox-marshal and slack-daily-brief are not tested here).
 - An MCP server for the sandbox tools; a second target scenario.
 - Whether any simulated-target finding transfers to real models: the one comparison available says it did not (50.5% simulated vs 0% measured on Haiku 4.5).

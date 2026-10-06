@@ -52,3 +52,36 @@ target = LLMTarget.live(tools, "<model-name>")
 - `attempted` is not available for a live model (the target cannot report which calls were "on instruction"); the harness falls back to "a guard blocked an injected call". `progress` is therefore less informative.
 - Live runs are not deterministic (a positive control fired on the second try, not the first), and audit replay refuses live records. Record the model name, the date and the number of trials next to any result you publish, and do not mix them with the simulated numbers.
 - Do not paste live transcripts that contain anything other than this sandbox's synthetic data.
+
+# Running the adaptive LLM attacker live (not yet run)
+
+**Status: built, offline-tested only, not run live.** `LLMAttacker`, the campaign loop and `scripts/run_adaptive_live.py` have only ever run against stub models in the test suite. No live result exists; do not read anything into the numbers until a real run is committed.
+
+**What it does.** A model writes the attack email, sees how the target reacted (which defense blocked it, the target's tool calls and reply, whether the oracle fired) and refines it for up to R rounds. Only the deterministic oracles decide success. Conditions: adaptive attacker with no defense; adaptive attacker against all four defenses; a blind-mutation control (no defense, same attempt budget, no feedback). The static corpus result (0/165) is referenced, not re-run.
+
+```bash
+pip install -e ".[llm]"
+python scripts/run_adaptive_live.py --dry-run          # plan and call counts; calls nothing; needs no key
+export ANTHROPIC_API_KEY=...                           # environment only; there is no --api-key flag
+python scripts/run_adaptive_live.py --live             # prints the plan, then refuses without --yes
+python scripts/run_adaptive_live.py --live --yes
+```
+
+**Set a spend limit with your provider first.** The guards below count calls, not money.
+
+**Default budget** (5 goals x 3 independent campaigns x 8 rounds):
+
+| Condition | Campaigns | Target runs (max) | Attacker calls (max) |
+|---|---|---|---|
+| adaptive, no defense | 15 | 120 | 120 |
+| adaptive, all four defenses | 15 | 120 | 120 |
+| blind mutation, no defense | 15 | 120 | 0 |
+| **Total** | 45 | **360** | **240** |
+
+These are upper bounds: a campaign stops at its first success, and a refusal costs an attacker call but no target run. One "target run" is a whole agent run (several API requests, capped at 30 per run by default); I have not measured the request count for this experiment, so there is no dollar estimate. "Target runs" also counts rounds the input screen stopped before the model ran. Shrink it first, for example `--goals delete_all --campaigns 1 --rounds 3 --conditions adaptive_none`.
+
+**Guards.** `--max-target-runs N` and `--max-attacker-calls N` (hard, per invocation, default: the plan's totals), `--target-request-limit N`, a kill switch (`touch WHETSTONE_KILL` from another terminal, or `WHETSTONE_KILL_SWITCH=1`; `WHETSTONE_KILL_FILE` names another file), and a clean abort that saves partial results. Exit codes: 0 done, 2 refused or bad usage (missing `--live`, `--yes` or key), 3 budget reached, 4 kill switch, 5 model or target error.
+
+**Output.** `evals/results/live_adaptive/<run_id>/summary.json` (rewritten after every campaign) and one hash-chained `audit_<condition>.jsonl` per condition. The JSON records the attacker and target model names, date, seed, library versions and git commit, per-condition campaign success with Wilson and exact 95% intervals, attempts to first success, per-goal results, refusal and guardrail-rejection rates, tokens, the adaptive-versus-blind comparison (difference and Fisher exact p) and the static reference. Verify a chain with `python -m whetstone report --audit <file>`.
+
+**Read the results with these limits.** The attacker's samples cannot be seeded, so a rerun will differ; the seed fixes the sandbox canaries and the blind control. 15 campaigns per condition gives wide intervals (0/15 only bounds the rate below about 22%). The attacker is told the goals, tool names and task text. Aborted campaigns are excluded from the rate and counted separately. Results are for one attacker prompt, one attacker model, one target and one task. Scope: this project's own simulated sandbox only; see the dual-use section of `docs/THREAT_MODEL.md`.

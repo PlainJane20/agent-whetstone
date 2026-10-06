@@ -1,6 +1,6 @@
 # Architecture
 
-Everything runs against a **simulated** sandbox (synthetic inbox, fake tools, fake canary secrets) and a **simulated** target. No network, no model, no real system. Attacks target only this project's own sandbox.
+Everything runs against a **simulated** sandbox (synthetic inbox, fake tools, fake canary secrets). The default target is a **simulation**; a real model can be plugged in as target (run once, by hand) or as attacker (built, never run), only through optional, guarded entry points. The sandbox has no network and no real system behind it. Attacks target only this project's own sandbox.
 
 ## Flow of one attack run
 
@@ -46,10 +46,15 @@ sequenceDiagram
 | Sandbox | `sandbox/env.py` | Synthetic inbox, 6 mail and chat tools plus 2 note tools, private notes holding fake `CANARY-` tokens, append-only `EffectsLedger` of every call |
 | Targets | `targets/base.py` | `Target` protocol; `ToolBox` puts a guard between any target and the sandbox and keeps the attempted-call log |
 | | `targets/gullible.py` | `GullibleTarget`: deterministic **simulation** that follows instructions per an author-set `SusceptibilityProfile`; seeded, paired across defenses |
-| | `targets/llm.py` | `LLMTarget`: pydantic-ai Agent bound to the same tools. **Built, not run**; tested with TestModel and FunctionModel only |
+| | `targets/llm.py` | `LLMTarget`: pydantic-ai Agent bound to the same tools. Unit-tested with TestModel and FunctionModel; run live once by hand (Claude Haiku 4.5, results in `evals/results/live/`); optional per-run request cap |
 | Attacks | `attacks/corpus.py` | 11 technique families x 5 goals = 55 base attacks; 3 goal paraphrases |
 | | `attacks/mutators.py` | 14 seeded mutators (lookalikes, zero-width, synonyms, framing, encodings, secret re-encoding, re-paraphrase) |
-| | `attacks/attackers.py` | `Attacker` protocol; `ScriptedAttacker`, `MutatingAttacker` (adaptive), `BlindMutator` (control), `LLMAttacker` (stub) |
+| | `attacks/attackers.py` | `Attacker` protocol; `ScriptedAttacker`, `MutatingAttacker` (adaptive), `BlindMutator` (control) |
+| | `attacks/llm_attacker.py` | `LLMAttacker`: pydantic-ai Agent, structured `AttackSpec` output, prompt with goals, task and feedback; a refusal is a result. **Built, offline-tested only, not run live** |
+| | `attacks/feedback.py` | What the attacker may see after a round (no hidden fields, canaries withheld); `Generation`; draft to `Attack` |
+| | `attacks/guardrails.py` | Deterministic validator for every generated attack: reserved domains, key-like strings, canary marker, phone and IP, real organisations, length, technique set |
+| | `attacks/campaign.py` | Campaign loop (R rounds, stop at first success), `Budget`, `KillSwitch`, `BlindSource` control, per-round audit records and spans |
+| | `adaptive_experiment.py`, `stats.py` | Plan, run and summarise the 3-condition experiment (adaptive, adaptive vs all defenses, blind control); Wilson, exact and Fisher; `scripts/run_adaptive_live.py` is the guarded entry point |
 | Oracles | `oracles.py` | Canary in output or outbound args (plain and re-encoded), forbidden tool call, recipient outside allow-list, mass deletion; one goal oracle per goal |
 | Defenses | `defenses/input_screen.py` | Fold, decode (base64, rot13, leetspeak), weighted rule scan per message; versioned `RuleSet` |
 | | `defenses/spotlight.py` | Random per-call delimiters plus an explicit instruction; a fixed-delimiter mode shows the spoofing weakness |
@@ -60,7 +65,7 @@ sequenceDiagram
 | Corpus | `benign.py` | 72 hand-written benign messages (36 hard), stratified train/validation/test split |
 | Harness | `harness.py` | `run_attack`, `run_corpus`, `run_benign`, `spar`, `replay`, aggregation |
 | Audit | `audit.py` | Hash-chained JSONL log; verify; replay support |
-| Tracing | `tracing.py` | OpenTelemetry spans; no-op unless a provider is configured |
+| Tracing | `tracing.py` | OpenTelemetry spans (attack run, target step, defense check, oracle, defender round, campaign, round, attacker call); no-op unless a provider is configured |
 | CLI | `cli.py` | `run-attacks`, `run-defenses`, `spar`, `report` |
 
 ## Where each defense acts
@@ -72,6 +77,21 @@ sequenceDiagram
 | `guard` | ToolPolicy | the tool name and arguments | secrets in an allowed destination; output text |
 | `guard` | EgressFilter | secret patterns in arguments | reversed or hex secrets by default; forwards or deletes of ordinary mail |
 | `finalize_output` | EgressFilter | secret patterns and images in the answer | the same encodings |
+
+## Adaptive campaign flow (built, offline-tested only, not run live)
+
+```mermaid
+flowchart LR
+    G[LLMAttacker<br/>goal + task + feedback] --> V{Guardrails<br/>validate draft}
+    V -->|rejected / refused| REC[Round record<br/>+ audit]
+    V -->|ok| H[Harness: fresh sandbox,<br/>defenses, target]
+    H --> O[Oracle decides]
+    O --> REC
+    REC -->|feedback: blocked_by, tool calls,<br/>output, oracle fired| G
+    O -->|success| STOP[Stop campaign]
+```
+
+Budget, kill switch and abort checks run before every attacker call and every target run.
 
 ## Scoring and progress
 
@@ -85,4 +105,8 @@ The oracle reads only the effects ledger (calls that actually executed) and the 
 | Defense raises | Not caught: a crash is a visible bug, not a silent pass |
 | Tampered audit record | `verify` reports the first bad index |
 | `LLMTarget.live` with no key | Raises before anything is built; the CLI refuses without `--live` and an environment key |
-| `LLMAttacker`, `LLMDefender` | Raise `NotImplementedError` |
+| `LLMDefender` | Raises `NotImplementedError` (not built) |
+| Attacker refuses, or returns no structured output | Recorded round outcome `attacker_refused`; costs an attacker call, not a target run; never an error |
+| Generated attack fails validation | Recorded round outcome `attack_rejected` with the reasons; not run; the reasons go back to the attacker as feedback |
+| Budget reached, kill switch, attacker or target error | Campaign ends `aborted` with a reason; the experiment stops, saves partial results and audit chains, and exits 3, 4 or 5 |
+| `scripts/run_adaptive_live.py` without `--live`, `--yes` or `ANTHROPIC_API_KEY` | Prints the plan, refuses (exit 2), calls nothing |

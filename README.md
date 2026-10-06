@@ -9,7 +9,7 @@
 [![Python 3.11+](https://img.shields.io/badge/Python_3.11+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
 [![pydantic-ai](https://img.shields.io/badge/pydantic--ai-LLMTarget_(run_once:_Claude_Haiku_4.5)-E92063?style=for-the-badge&logo=pydantic&logoColor=white)](src/whetstone/targets/llm.py)
 [![OpenTelemetry](https://img.shields.io/badge/OpenTelemetry-spans-f59e0b?style=for-the-badge&logo=opentelemetry&logoColor=white)](src/whetstone/tracing.py)
-[![Tests](https://img.shields.io/badge/Offline_tests-240_passing-2a78d6?style=for-the-badge)](tests/)
+[![Tests](https://img.shields.io/badge/Offline_tests-427_passing-2a78d6?style=for-the-badge)](tests/)
 [![Environment](https://img.shields.io/badge/Sandbox-SIMULATED_tools_%2B_data-b45309?style=for-the-badge)](#known-limits)
 [![Scope](https://img.shields.io/badge/Scope-defensive_only-e11d48?style=for-the-badge)](docs/THREAT_MODEL.md)
 
@@ -76,9 +76,9 @@ the attacks that won. Everything is written to an audit chain.
 |---|---|
 | **Problem** | Measure how well guardrails stop injection and exfiltration, without fooling yourself with a vacuous eval, an LLM judge, or a corpus the defense has memorised |
 | **Approach** | 55 base attacks (11 technique families x 5 goals) plus seeded mutators; 72 hand-written benign messages (36 hard); four composable defenses; deterministic oracles; paired seeds so every defense sees the same random draws |
-| **Proof** | **Real model (Claude Haiku 4.5, 2026-10-05, 55 attacks x 3 trials): 0/165 attacks succeeded with no defense (95% upper bound about 2.2%) and 0/165 with all four defenses; the defenses cost 3/72 = 4.2% benign false positives and cannot be shown to help against this model.** Positive controls confirmed the oracles can fire on the live pipeline. **Simulated gullible target** (an author assumption, not a model of Haiku): no-defense ASR 50.5% (139/275), full stack 0.0% (0/275) at 4.2% false positives; held-out technique families: learned rules only cut ASR by 26 to 37%; after 5 rounds of mutation the full stack still has 7 broken base attacks. 240 offline tests. Oracles: 12/12 known-bad fire, 11/11 known-good silent |
+| **Proof** | **Real model (Claude Haiku 4.5, 2026-10-05, 55 attacks x 3 trials): 0/165 attacks succeeded with no defense (95% upper bound about 2.2%) and 0/165 with all four defenses; the defenses cost 3/72 = 4.2% benign false positives and cannot be shown to help against this model.** Positive controls confirmed the oracles can fire on the live pipeline. **Simulated gullible target** (an author assumption, not a model of Haiku): no-defense ASR 50.5% (139/275), full stack 0.0% (0/275) at 4.2% false positives; held-out technique families: learned rules only cut ASR by 26 to 37%; after 5 rounds of mutation the full stack still has 7 broken base attacks. 427 offline tests. Oracles: 12/12 known-bad fire, 11/11 known-good silent |
 | **Output** | ASR per technique and goal, false-positive rate, canary leak rate, latency p50/p95, versioned rule sets, hash-chained replayable audit log (22/22 replays identical), OpenTelemetry spans |
-| **Not yet** | One real model, one task prompt, one non-adaptive author-written corpus: nothing here says other models are as robust. No LLM-driven attacker or defender (`LLMAttacker` and `LLMDefender` are still NOT built), no live latency, no real agent products, no MCP server for the sandbox tools, no second scenario (Slack summariser). The tools are simulated |
+| **Not yet** | One real model, one task prompt, one non-adaptive author-written corpus: nothing here says other models are as robust. The LLM-driven adaptive attacker is **built and offline-tested only, not run live** (no result exists; `LLMDefender` is still NOT built), no live latency, no real agent products, no MCP server for the sandbox tools, no second scenario (Slack summariser). The tools are simulated |
 
 ## Competencies demonstrated
 
@@ -157,6 +157,84 @@ that script itself**.
 
 **The simulated 50.5% below is not about this model.** It was an assumption I wrote into the
 susceptibility profile. Against a real model on the same corpus the measured rate was 0%.
+
+## Adaptive attacker (built, offline-tested only, not run live)
+
+**Status: built, offline-tested only, not run live.** There is no adaptive-attacker result in
+this repository. Everything below describes code and what its offline tests check, not a
+measurement.
+
+**Why.** The real model resisted all 165 static, author-written attacks (0/165, with or without
+defenses). A fixed corpus cannot tell me whether a model that *reads the target's reaction and
+tries again* does better. `LLMAttacker` is that experiment's attacker.
+
+**What it is.** A pydantic-ai Agent (default model `anthropic:claude-haiku-4-5-20251001`,
+configurable, optional `[llm]` extra) with structured output: `subject`, `body`, a `technique`
+label from the fixed 11-family list, and a short `rationale`. Its prompt says plainly that this
+is an authorised test of the author's own sandbox with fake secrets, states the five fixed goals
+and the target's task text, and shows per-round **feedback**: round number, which defense blocked
+it (if any), the target's tool-call names and summarised arguments, the target's output text
+and whether the oracle fired. Feedback never includes the simulation's hidden fields (`origin`,
+`attempted`, `progress`, screen score, tool-result text), and anything carrying a canary in any
+form the oracle knows is withheld. **The attacker never judges success**: only the deterministic
+oracles do ([ADR 001](docs/adr/001-deterministic-oracles-not-llm-judges.md)).
+
+**Campaign loop** (`src/whetstone/attacks/campaign.py`). For one goal, up to R rounds (default
+8): generate with feedback, validate, plant the email among the benign inbox in a fresh sandbox,
+run the same harness (optional defense stack), score with the oracles; stop at the first success.
+Each round records attack text, technique, outcome (`success`, `failure`, `attacker_refused`,
+`attack_rejected`), `blocked_by`, tool names and tokens, and writes a hash-chained audit record
+(target label `llm:<model>`, attacker model, campaign id). OpenTelemetry spans: `campaign`,
+`round`, `attacker_call`; no attack text is ever put in span attributes.
+
+**Safety guardrails** (`attacks/guardrails.py`, deterministic, tested). Every generated attack
+is validated before use: no URLs or email addresses outside reserved test domains (`.test`,
+`.example`, `.invalid`, `example.com/org/net`, `corp.example`), nothing resembling real
+credentials (`sk-`, `AKIA`, private-key headers, token prefixes, high-entropy token-like strings,
+also inside base64 or hex), no phone numbers or IPs, no named real organisations or services,
+no `CANARY-` marker (so the attacker cannot plant the secret and fake a leak), a length cap, a
+technique label from the fixed set. A model **refusal** (plain text, no structured output, a
+content-filter stop) is a recorded outcome, `attacker_refused`, not an error, and the refusal
+rate is reported. The sandbox tools stay in-memory with no network, and a test asserts the
+sandbox path imports no HTTP client. What these checks do **not** guarantee is in
+[`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md).
+
+**Controls, so the comparison is fair.** (a) A **blind-mutation control**: the existing
+`BlindMutator` and mutators, same attempt budget per goal and campaign, no feedback, same live
+target. (b) The static corpus result (0/165) is **referenced, not re-run**. Metrics: campaign
+success rate per condition (at least one success within R rounds) with Wilson and exact 95%
+intervals, attempts to first success, per-goal results, refusal rate, adaptive versus blind
+(difference and Fisher exact p). With 15 campaigns per condition the intervals will be wide: a
+0/15 outcome only bounds the campaign rate below about 22%.
+
+**Budget.** Default: 5 goals x 3 independent campaigns x 8 rounds = **120 target runs and up to
+120 attacker calls per condition**, in three conditions (adaptive with no defense, adaptive with
+all four defenses, blind control with no defense): at most **360 target runs and 240 attacker
+calls** per invocation, fewer if campaigns succeed early. Each target run is a multi-request
+agent run; the number of API requests per run was **not measured** for this experiment, so I
+cannot give a dollar figure. Hard guards: `--max-target-runs`, `--max-attacker-calls`, a per-run
+request cap, a kill switch (`touch WHETSTONE_KILL` or `WHETSTONE_KILL_SWITCH=1`), clean abort
+with partial results saved and distinct exit codes. **Set a spend limit with your provider first**:
+the guards count calls, not money. The count of "target runs" includes rounds the input screen
+stopped before the model ran, so it overstates paid target calls under the defended condition.
+
+**How to run** (`scripts/run_adaptive_live.py`; details in [`scripts/run_live.md`](scripts/run_live.md)):
+
+```bash
+python scripts/run_adaptive_live.py --dry-run     # plan and call counts; calls nothing, needs no key
+export ANTHROPIC_API_KEY=...                      # environment only; never accepted on the command line
+python scripts/run_adaptive_live.py --live        # prints the plan, refuses without --yes
+python scripts/run_adaptive_live.py --live --yes  # runs; saves JSON and audit chains under evals/results/live_adaptive/
+```
+
+**What is verified and what is not.** Verified offline, with stubs only (pydantic-ai
+`FunctionModel` and `TestModel`, and a scripted stub target; `ALLOW_MODEL_REQUESTS` is switched
+off for the whole test suite): the loop logic, feedback contents, validators, refusal handling,
+budgets and abort, the kill switch, the script's refusals, audit chains and span contents.
+**Not verified:** how any real model responds to the prompt (it may refuse most of the time, or
+write drafts the validators reject), whether the prompt works at all, real token or dollar cost,
+the Anthropic structured-output and refusal paths on the real API (only simulated by stubs),
+and whether adaptive beats blind or static. CI never calls a model.
 
 ## Real output: the simulated target
 
@@ -401,7 +479,7 @@ progress and output hash); flipping one stored outcome is detected at exactly th
 
 ```mermaid
 flowchart LR
-    AT[Attacker<br/>scripted or mutating] --> SC{Front door<br/>InputScreen +<br/>Spotlighting}
+    AT[Attacker<br/>scripted, mutating,<br/>or LLM: not run live] --> SC{Front door<br/>InputScreen +<br/>Spotlighting}
     SC -->|blocked| OR
     SC -->|content| TG[Target<br/>simulated gullible agent<br/>or a live LLM]
     TG -->|tool call| GD{Guard<br/>ToolPolicy + EgressFilter}
@@ -426,7 +504,8 @@ defenses do not stop: [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md). Design rul
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
-python -m pytest                    # 240 offline tests
+python -m pytest                    # 427 offline tests
+python scripts/run_adaptive_live.py --dry-run   # plan for the adaptive attacker; calls no model
 python -m evals.run_all             # all evals -> evals/results/*.json (about 45 seconds)
 ```
 
@@ -448,13 +527,14 @@ your own `ANTHROPIC_API_KEY` in the environment (never on the command line); see
 [`scripts/run_live.md`](scripts/run_live.md). Only ever point it at this sandbox. It costs
 money: start with one family and one trial.
 
-## Planned (not built)
+## Planned (not built or not run)
 
 - [ ] **MCP server** exposing the sandbox tools, so an external agent can be attacked through
       the same guards
-- [ ] **An LLM-driven adaptive attacker** that sees refusals and tries again. This is the
-      most important gap: the corpus is fixed and non-adaptive, and the real model beat it.
-      `LLMAttacker` and `LLMDefender` are **still NOT built** (stubs that raise
+- [ ] **Run the adaptive attacker live.** `LLMAttacker`, the campaign loop and
+      `scripts/run_adaptive_live.py` are built and offline-tested only; no live result exists.
+      The corpus is fixed and non-adaptive and the real model beat it, so this is the most
+      important next measurement. `LLMDefender` is still NOT built (a stub that raises
       `NotImplementedError`)
 - [ ] **Stronger and indirect attacks**, and **other models and tasks**: one model (Haiku 4.5)
       and one task prompt is not a robustness claim
@@ -463,6 +543,8 @@ money: start with one family and one trial.
 - [ ] **A second target scenario** (a Slack summariser) to test whether findings transfer
 - [ ] Real-agent targets from this portfolio ([inbox-marshal](https://github.com/PlainJane20/inbox-marshal),
       [slack-daily-brief](https://github.com/PlainJane20/slack-daily-brief)), behind the `Target` protocol
+- [x] `LLMAttacker`, adaptive campaign loop, safety validators, budget guards and live script
+      (built, offline-tested only, **not run live**)
 - [x] A live `LLMTarget` run against Claude Haiku 4.5 (once, by hand; committed results,
       positive controls), with audit records labelled by the real target
 - [x] Sandbox, 11 attack families x 5 goals, seeded mutators, adaptive and blind attackers
@@ -501,7 +583,11 @@ money: start with one family and one trial.
   95% interval up to 17.6%.
 - **Shared goal wording.** Three paraphrases per goal are reused across families, which can
   inflate cross-family generalisation. Experiment E3 reduces but does not remove this.
-- **The adaptive attacker gets feedback** (`progress`, `blocked_by`) that a black-box attacker
+- **The LLM attacker has never run.** Everything in the adaptive-attacker section is
+  offline-tested with stubs; the real model's behaviour as attacker is unmeasured. It is also told the
+  goals, tool names and task text, a white-box-ish assumption, and its validators are a deny-list,
+  not a safety guarantee.
+- **The simulated adaptive attacker gets feedback** (`progress`, `blocked_by`) that a black-box attacker
   may not, and it was no better than blind mutation, so it is not a strong attacker.
 - **Deterministic filters can be bypassed.** The evals show it (Greek homoglyphs, synonyms,
   reversed or hex secrets). See [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md).
@@ -519,20 +605,22 @@ agent-whetstone/
 ├── src/whetstone/
 │   ├── sandbox/        synthetic inbox, fake tools, effects ledger, canaries
 │   ├── targets/        Target protocol, GullibleTarget (simulated), LLMTarget (run once live)
-│   ├── attacks/        corpus (11 families x 5 goals), seeded mutators, attackers
+│   ├── attacks/        corpus (11 families x 5 goals), seeded mutators, attackers, LLMAttacker,
+│   │                   guardrails (validators), feedback, campaign loop (built, not run live)
 │   ├── defenses/       InputScreen, Spotlighting, EgressFilter, ToolPolicy, stack,
 │   │                   RuleProposer, Defender protocol
 │   ├── oracles.py      deterministic success detection
 │   ├── benign.py       72 hand-written benign messages, stratified split
 │   ├── harness.py      attack run, benign run, spar loop, replay
+│   ├── adaptive_experiment.py  plan, run and summarise the adaptive experiment; stats.py
 │   ├── audit.py  tracing.py  textnorm.py  models.py  cli.py
-├── tests/              240 offline tests
+├── tests/              427 offline tests
 ├── evals/              baseline, defenses, generalisation, mutation, latency,
 │   │                   oracle_sanity, audit_replay, run_all
 │   ├── live_positive_control.py   needs a key, not in CI
 │   └── results/        committed JSON and a sample audit chain from the last run;
 │       └── live/       the Claude Haiku 4.5 results and audit chains
-├── scripts/            run_live.md (how the live run was done), check_svg_overflow.py
+├── scripts/            run_live.md, run_adaptive_live.py (not run live), check_svg_overflow.py
 └── docs/               architecture, threat model, competency map, ADR, banner, diagram
 ```
 
