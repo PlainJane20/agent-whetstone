@@ -1,6 +1,6 @@
 # Competency map
 
-Each entry names the code or test that demonstrates it. Nothing here is claimed without evidence in the repository, and the environment is simulated. The target is a simulation of a gullible agent, not an LLM.
+Each entry names the code or test that demonstrates it. Nothing here is claimed without evidence in the repository, and the sandbox is simulated. The default target is a simulation of a gullible agent, not an LLM; one real model (Claude Haiku 4.5) was also run once, by hand, and is reported separately.
 
 ## Adversarial evaluation design
 
@@ -75,12 +75,13 @@ Each entry names the code or test that demonstrates it. Nothing here is claimed 
 
 **Evidence:**
 - Environment labelled SIMULATED in every eval output; target described as a simulation in the README, the module docstring and the JSON caveat.
-- `LLMTarget` built and tested only with TestModel; `LLMAttacker` and `LLMDefender` raise `NotImplementedError`; `--target llm` needs `--live` and an environment key; `tests/test_llm_target.py`, `tests/test_cli.py`.
+- `LLMTarget` unit-tested with TestModel and run live once against Claude Haiku 4.5 (0/165 undefended, 0/165 defended, 3/72 benign false positives; `evals/results/live/`); a null result reported as a null result, with an exact upper bound and the limits of that bound; `LLMAttacker` and `LLMDefender` still raise `NotImplementedError`; `--target llm` needs `--live` and an environment key; `tests/test_llm_target.py`, `tests/test_cli.py`.
+- Live-run hygiene: audit records carry the real target label (a hardcoded `gullible` label was found and fixed, `test_harness_target_label.py`), replay refuses non-simulated records, and positive controls show the live pipeline can register a success (`evals/live_positive_control.py`, not run in CI; the 2026-10-05 control was an equivalent ad-hoc run).
 - [THREAT_MODEL.md](THREAT_MODEL.md) lists what the defenses do not stop.
 
 ## Not demonstrated
 
-- Any real LLM, as a target, an attacker or a defender.
+- A real LLM as an attacker or defender (not built). A real LLM as a target is demonstrated for one model, one task and 3 trials only.
 - Any real mailbox, chat service or agent product (inbox-marshal and slack-daily-brief are not tested here).
 - An MCP server for the sandbox tools; a second target scenario.
-- Whether any finding transfers from the simulated target to real models.
+- Whether any simulated-target finding transfers to real models: the one comparison available says it did not (50.5% simulated vs 0% measured on Haiku 4.5).

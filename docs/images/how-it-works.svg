@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 640" role="img" aria-labelledby="t d" font-family="Inter, -apple-system, Segoe UI, Helvetica, Arial, sans-serif">
   <title id="t">How Whetstone works</title>
-  <desc id="d">An attacker agent sends synthetic injection attacks at a simulated gullible agent. Input screening and spotlighting sit in front of it, and a tool policy and egress filter guard what it does inside a sandbox with fake tools and fake canary secrets. A deterministic oracle scores the outcome. The score feeds a defender that proposes new screening rules, and every attempt lands in a hash-chained audit log.</desc>
+  <desc id="d">An attacker agent sends synthetic injection attacks at a target agent, by default a simulated gullible agent, optionally a real model. Input screening and spotlighting sit in front of it, and a tool policy and egress filter guard what it does inside a sandbox with fake tools and fake canary secrets. A deterministic oracle scores the outcome. The score feeds a defender that proposes new screening rules, and every attempt lands in a hash-chained audit log.</desc>
   <defs>
     <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
       <path d="M0 0L10 5L0 10z" fill="#be123c"/>
@@ -12,7 +12,7 @@
   <rect width="1200" height="640" rx="20" fill="#f8fafc"/>
 
   <text x="600" y="46" text-anchor="middle" font-size="26" font-weight="700" fill="#0f172a">How Whetstone works</text>
-  <text x="600" y="74" text-anchor="middle" font-size="15" fill="#475569">Attackers and defenders spar around a simulated target. A deterministic oracle keeps score.</text>
+  <text x="600" y="74" text-anchor="middle" font-size="15" fill="#475569">Attackers and defenders spar around a target agent. A deterministic oracle keeps score.</text>
 
   <!-- ROW 1 -->
   <g filter="url(#sh)"><rect x="36" y="100" width="250" height="140" rx="14" fill="#ffffff" stroke="#e11d48" stroke-width="2.5"/></g>
@@ -33,10 +33,10 @@
 
   <g filter="url(#sh)"><rect x="616" y="100" width="250" height="140" rx="14" fill="#ffffff" stroke="#14b8a6" stroke-width="2"/></g>
   <text x="741" y="132" text-anchor="middle" font-size="12" font-weight="700" fill="#0f766e" letter-spacing="1.5">3  THE TARGET</text>
-  <text x="741" y="162" text-anchor="middle" font-size="21" font-weight="700" fill="#0f172a">Simulated agent</text>
+  <text x="741" y="162" text-anchor="middle" font-size="21" font-weight="700" fill="#0f172a">Simulated or live agent</text>
   <text x="741" y="188" text-anchor="middle" font-size="13" fill="#334155">follows instructions by an</text>
   <text x="741" y="207" text-anchor="middle" font-size="13" fill="#334155">author-set susceptibility profile</text>
-  <text x="741" y="228" text-anchor="middle" font-size="12" font-style="italic" fill="#64748b">a model of gullibility, not an LLM</text>
+  <text x="741" y="228" text-anchor="middle" font-size="12" font-style="italic" fill="#64748b">default: a simulation; or a real LLM</text>
   <path d="M870 170H902" stroke="#be123c" stroke-width="2.5" fill="none" marker-end="url(#arr)"/>
 
   <g filter="url(#sh)"><rect x="906" y="100" width="250" height="140" rx="14" fill="#ffffff" stroke="#f59e0b" stroke-width="2"/></g>
@@ -88,6 +88,6 @@
   <text x="60" y="502" font-size="13" font-weight="700" fill="#be123c" letter-spacing="1.5">DEFENSIVE SCOPE</text>
   <text x="60" y="530" font-size="15" fill="#334155">Attacks only ever touch this project's own SIMULATED sandbox: synthetic emails, fake tools, fake canary strings.</text>
   <text x="60" y="552" font-size="15" fill="#334155">Payloads are generic and benign (make a fake tool call, reveal a fake string). No real service is targeted.</text>
-  <text x="60" y="574" font-size="15" fill="#334155">The target is a simulation of a gullible agent, so results measure the harness and relative defense effects.</text>
+  <text x="60" y="574" font-size="15" fill="#334155">The default target is a simulation, not an LLM; real-model runs (Haiku 4.5) are reported separately.</text>
   <text x="60" y="592" font-size="13" font-style="italic" fill="#64748b">Do not point any of this at a system you do not own.</text>
 </svg>

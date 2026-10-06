@@ -1,7 +1,7 @@
 """CLI: python -m whetstone {run-attacks, run-defenses, spar, report}.
 
-Everything runs offline against the SIMULATED sandbox. `--target llm` is built but has never
-been run in this repository; it needs your own ANTHROPIC_API_KEY (environment only) and the
+Everything runs offline against the SIMULATED sandbox. `--target llm` was run once by hand
+(see the README); it is never run by tests or CI and needs your own ANTHROPIC_API_KEY (environment only) and the
 explicit --live flag. See scripts/run_live.md.
 """
 from __future__ import annotations
@@ -28,7 +28,7 @@ def _factory(args):
         return gullible_factory()
     if not args.live:
         raise SystemExit("error: --target llm needs --live (it calls a real model with your own key; "
-                         "it has never been run in this repository)")
+                         "tests and CI never use it)")
     if not os.environ.get("ANTHROPIC_API_KEY"):
         raise SystemExit("error: set ANTHROPIC_API_KEY in your environment (never on the command line)")
     if not args.model:
@@ -144,7 +144,7 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--trials", type=int, default=5)
         p.add_argument("--technique", action="append", choices=FAMILIES, help="limit to a family")
         p.add_argument("--target", choices=("gullible", "llm"), default="gullible")
-        p.add_argument("--live", action="store_true", help="required for --target llm (never run here)")
+        p.add_argument("--live", action="store_true", help="required for --target llm (calls a real model; never run by tests or CI)")
         p.add_argument("--model", help="model name for --target llm")
         p.add_argument("--audit", help="write a hash-chained audit log (JSONL) to this path")
         p.add_argument("--json", action="store_true")

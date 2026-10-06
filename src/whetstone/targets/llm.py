@@ -1,8 +1,8 @@
 """LLMTarget: a pydantic-ai Agent bound to the sandbox tools.
 
-STATUS: BUILT, NOT RUN. It is unit-tested only with pydantic-ai's TestModel and stub models.
-It has never been pointed at a live model in this repository, and no result in the README
-or in evals/results comes from it. To run it yourself with your own key, see scripts/run_live.md.
+STATUS: unit-tested offline with pydantic-ai's TestModel and stub models. Run live once, by hand,
+on 2026-10-05 against claude-haiku-4-5-20251001; results are in evals/results/live/ and are never
+mixed with the simulated numbers. To run it yourself with your own key, see scripts/run_live.md.
 
 The key is read from the ANTHROPIC_API_KEY environment variable only. Only ever point this at
 the project's own simulated sandbox.
@@ -77,7 +77,7 @@ class LLMTarget:
 
     @classmethod
     def live(cls, tools: ToolBox, model_name: str) -> "LLMTarget":
-        """Build a target for a real Anthropic model. NOT RUN in this repository."""
+        """Build a target for a real Anthropic model. Never called by tests or CI."""
         if not os.environ.get("ANTHROPIC_API_KEY"):
             raise RuntimeError("set ANTHROPIC_API_KEY in your environment to run a live target")
         return cls(tools, f"anthropic:{model_name}")
