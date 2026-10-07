@@ -9,7 +9,7 @@
 [![Python 3.11+](https://img.shields.io/badge/Python_3.11+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
 [![pydantic-ai](https://img.shields.io/badge/pydantic--ai-LLMTarget_(run_once:_Claude_Haiku_4.5)-E92063?style=for-the-badge&logo=pydantic&logoColor=white)](src/whetstone/targets/llm.py)
 [![OpenTelemetry](https://img.shields.io/badge/OpenTelemetry-spans-f59e0b?style=for-the-badge&logo=opentelemetry&logoColor=white)](src/whetstone/tracing.py)
-[![Tests](https://img.shields.io/badge/Offline_tests-427_passing-2a78d6?style=for-the-badge)](tests/)
+[![Tests](https://img.shields.io/badge/Offline_tests-587_passing-2a78d6?style=for-the-badge)](tests/)
 [![Environment](https://img.shields.io/badge/Sandbox-SIMULATED_tools_%2B_data-b45309?style=for-the-badge)](#known-limits)
 [![Scope](https://img.shields.io/badge/Scope-defensive_only-e11d48?style=for-the-badge)](docs/THREAT_MODEL.md)
 
@@ -76,7 +76,7 @@ the attacks that won. Everything is written to an audit chain.
 |---|---|
 | **Problem** | Measure how well guardrails stop injection and exfiltration, without fooling yourself with a vacuous eval, an LLM judge, or a corpus the defense has memorised |
 | **Approach** | 55 base attacks (11 technique families x 5 goals) plus seeded mutators; 72 hand-written benign messages (36 hard); four composable defenses; deterministic oracles; paired seeds so every defense sees the same random draws |
-| **Proof** | **Real model (Claude Haiku 4.5, 2026-10-05, 55 attacks x 3 trials): 0/165 attacks succeeded with no defense (95% upper bound about 2.2%) and 0/165 with all four defenses; the defenses cost 3/72 = 4.2% benign false positives and cannot be shown to help against this model.** Positive controls confirmed the oracles can fire on the live pipeline. **Simulated gullible target** (an author assumption, not a model of Haiku): no-defense ASR 50.5% (139/275), full stack 0.0% (0/275) at 4.2% false positives; held-out technique families: learned rules only cut ASR by 26 to 37%; after 5 rounds of mutation the full stack still has 7 broken base attacks. 427 offline tests. Oracles: 12/12 known-bad fire, 11/11 known-good silent |
+| **Proof** | **Real model (Claude Haiku 4.5, 2026-10-05, 55 attacks x 3 trials): 0/165 attacks succeeded with no defense (95% upper bound about 2.2%) and 0/165 with all four defenses; the defenses cost 3/72 = 4.2% benign false positives and cannot be shown to help against this model.** Positive controls confirmed the oracles can fire on the live pipeline. **Simulated gullible target** (an author assumption, not a model of Haiku): no-defense ASR 50.5% (139/275), full stack 0.0% (0/275) at 4.2% false positives; held-out technique families: learned rules only cut ASR by 26 to 37%; after 5 rounds of mutation the full stack still has 7 broken base attacks. 587 offline tests. Oracles: 12/12 known-bad fire, 11/11 known-good silent |
 | **Output** | ASR per technique and goal, false-positive rate, canary leak rate, latency p50/p95, versioned rule sets, hash-chained replayable audit log (22/22 replays identical), OpenTelemetry spans |
 | **Not yet** | One real model, one task prompt, one non-adaptive author-written corpus: nothing here says other models are as robust. The LLM-driven adaptive attacker is **built and offline-tested; the full experiment is not yet run** (one 1-campaign smoke test is a pipeline check only, no result exists; `LLMDefender` is still NOT built), no live latency, no real agent products, no MCP server for the sandbox tools, no second scenario (Slack summariser). The tools are simulated |
 
@@ -575,7 +575,7 @@ defenses do not stop: [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md). Design rul
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
-python -m pytest                    # 427 offline tests
+python -m pytest                    # 587 offline tests
 python scripts/run_adaptive_live.py --dry-run   # plan for the adaptive attacker; calls no model
 python -m evals.run_all             # all evals -> evals/results/*.json (about 45 seconds)
 ```
@@ -685,7 +685,7 @@ agent-whetstone/
 │   ├── harness.py      attack run, benign run, spar loop, replay
 │   ├── adaptive_experiment.py  plan, run and summarise the adaptive experiment; stats.py
 │   ├── audit.py  tracing.py  textnorm.py  models.py  cli.py
-├── tests/              427 offline tests
+├── tests/              587 offline tests
 ├── evals/              baseline, defenses, generalisation, mutation, latency,
 │   │                   oracle_sanity, audit_replay, run_all
 │   ├── live_positive_control.py   needs a key, not in CI
