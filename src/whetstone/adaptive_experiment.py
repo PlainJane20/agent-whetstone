@@ -238,9 +238,9 @@ def summarize_condition(cond: Condition, results: list[CampaignResult], planned:
     rounds = [x for r in results for x in r.rounds]
     outcomes = Counter(x.outcome for x in rounds)
     adaptive = cond.kind == "adaptive"
-    model_calls = sum(x.attacker_calls for x in rounds) if adaptive else 0
+    model_calls = sum(x.attacker_calls or 0 for x in rounds) if adaptive else 0
     n_rounds = len(rounds) if adaptive else 0
-    retries = sum(x.retries for x in rounds) if adaptive else 0
+    retries = sum(x.retries or 0 for x in rounds) if adaptive else 0
     recovered = sum(1 for x in rounds if x.retries and x.outcome not in ("attacker_no_structured_output", "attacker_refused"))
     wasted = [r.campaign_id for r in results if r.all_rounds_wasted]
 
@@ -255,7 +255,7 @@ def summarize_condition(cond: Condition, results: list[CampaignResult], planned:
     return {
         "kind": cond.kind, "defenses": list(cond.defenses), "campaigns_planned": planned,
         "campaigns_completed": len(done), "campaigns_aborted": len(aborted),
-        "api_retries": sum(r.api_retries for r in results),
+        "api_retries": sum(r.api_retries or 0 for r in results),
         "campaign_success": stats.rate(len(wins), len(done)),
         "attempts_to_first_success": {"values": atts, "mean": round(statistics.mean(atts), 2) if atts else None,
                                       "median": statistics.median(atts) if atts else None},
@@ -466,12 +466,20 @@ def config_mismatches(saved: dict, cfg: ExperimentConfig) -> list[str]:
 def campaign_from_dict(d: dict) -> CampaignResult:
     """Rebuild a CampaignResult from its summary.json record (unknown/missing round fields tolerated)."""
     fields = set(RoundRecord.__dataclass_fields__)
-    rounds = [RoundRecord(**{k: v for k, v in r.items() if k in fields}) for r in d.get("rounds", [])]
+    counters = ("attacker_calls", "retries", "api_retries")   # absent or null in summaries written by older schemas
+
+    def _round(r: dict) -> RoundRecord:
+        kw = {k: v for k, v in r.items() if k in fields}
+        for c in counters:
+            if kw.get(c) is None:
+                kw.pop(c, None)                                 # fall back to the dataclass default (0)
+        return RoundRecord(**kw)
+    rounds = [_round(r) for r in d.get("rounds", [])]
     return CampaignResult(
         campaign_id=d["campaign_id"], goal=d["goal"], condition=d["condition"], attacker_model=d["attacker_model"],
         target=d["target"], seed=d["seed"], rounds_planned=d["rounds_planned"], rounds=rounds, status=d["status"],
         abort_reason=d.get("abort_reason"), abort_detail=d.get("abort_detail", ""),
-        abort_error=d.get("abort_error"), api_retries=d.get("api_retries", 0))
+        abort_error=d.get("abort_error"), api_retries=d.get("api_retries") or 0)
 
 
 @dataclass

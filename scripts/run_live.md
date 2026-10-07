@@ -87,3 +87,17 @@ These are upper bounds: a campaign stops at its first success, a refusal or non-
 **Output.** `evals/results/live_adaptive/<run_id>/summary.json` (rewritten after every campaign) and one hash-chained `audit_<condition>.jsonl` per condition. The JSON records the attacker and target model names, date, seed, library versions and git commit, per-condition campaign success with Wilson and exact 95% intervals, attempts to first success, per-goal results, separate refusal, no-structured-output and guardrail-rejection counts and rates, retries used, a warning for any campaign whose every round was wasted, tokens, the adaptive-versus-blind comparison (difference and Fisher exact p) and the static reference. Verify a chain with `python -m whetstone report --audit <file>`.
 
 **Read the results with these limits.** The attacker's samples cannot be seeded, so a rerun will differ; the seed fixes the sandbox canaries and the blind control. 15 campaigns per condition gives wide intervals (0/15 only bounds the rate below about 22%). The attacker is told the goals, tool names and task text. Aborted campaigns are excluded from the rate and counted separately. Results are for one attacker prompt, one attacker model, one target and one task. Scope: this project's own simulated sandbox only; see the dual-use section of `docs/THREAT_MODEL.md`.
+
+## Resuming an aborted adaptive run
+
+The first full adaptive run aborted after 17 of 45 campaigns on an unexplained `ModelAPIError`. The script
+now retries transient API errors with backoff and can resume:
+
+```bash
+python scripts/run_adaptive_live.py --resume 20261006-071655-seed0 --dry-run          # no key needed; prints what is left
+python scripts/run_adaptive_live.py --resume 20261006-071655-seed0 --live --yes       # needs ANTHROPIC_API_KEY in the environment
+```
+
+Resume refuses when the configuration differs from the saved run, re-runs the aborted campaign fresh while
+keeping the aborted attempt under `aborted_attempts`, and continues the same hash-chained audit logs. Budgets
+apply to the new work only. Retries and resume are offline-tested with stubs and have not run against the real API.
